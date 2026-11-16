@@ -1,0 +1,9 @@
+/secrets/
+/upstream/
+/build/
+/results/
+.env
+.env.*
+!.env.example
+*.pcap
+*.pcapng
