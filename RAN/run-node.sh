@@ -22,7 +22,8 @@ case "$node" in
       --rfsim
       '--MACRLCs.[0].local_n_address' "$ip"
       '--MACRLCs.[0].remote_n_address' "$F1_CU_IP"
-      --rfsimulator.serverport "$port"
+      # --rfsimulator.serverport "$port"
+      --rfsimulator.[0].serverport "$port"
     )
     ;;
   *) printf 'Unknown node: %s\n' "$node" >&2; exit 1 ;;
@@ -40,6 +41,6 @@ if [[ "${WITH_E2:-0}" == 1 ]]; then
   config="$work/runtime.conf"
 fi
 
-sudo ip netns exec e2e-f1-smoke \
+sudo ip netns exec "$RAN_NS" \
   "$root/upstream/oai/cmake_targets/ran_build/build/nr-softmodem" \
   -O "$config" "${args[@]}" 2>&1 | tee "$node.log"
