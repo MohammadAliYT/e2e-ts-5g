@@ -1,0 +1,20 @@
+diff --git a/examples/xApp/c/monitor/xapp_kpm_moni.c b/examples/xApp/c/monitor/xapp_kpm_moni.c
+index 040a0288..0f56f2ff 100644
+--- a/examples/xApp/c/monitor/xapp_kpm_moni.c
++++ b/examples/xApp/c/monitor/xapp_kpm_moni.c
+@@ -276,11 +276,14 @@ test_info_lst_t filter_predicate(test_cond_type_e type, test_cond_e cond, int va
+ 
+   dst.test_cond_value->octet_string_value = calloc(1, sizeof(byte_array_t));
+   assert(dst.test_cond_value->octet_string_value != NULL && "Memory exhausted");
+-  const size_t len_nssai = 1;
++  const size_t len_nssai = 4; // e2e-ts: SST + SD 010203
+   dst.test_cond_value->octet_string_value->len = len_nssai;
+   dst.test_cond_value->octet_string_value->buf = calloc(len_nssai, sizeof(uint8_t));
+   assert(dst.test_cond_value->octet_string_value->buf != NULL && "Memory exhausted");
+   dst.test_cond_value->octet_string_value->buf[0] = value;
++  dst.test_cond_value->octet_string_value->buf[1] = 0x01;
++  dst.test_cond_value->octet_string_value->buf[2] = 0x02;
++  dst.test_cond_value->octet_string_value->buf[3] = 0x03;
+ 
+   return dst;
+ }

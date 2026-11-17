@@ -12,6 +12,8 @@ case "$node" in
       '--gNBs.[0].amf_ip_address.[0].ipv4' "$AMF_IP"
       '--gNBs.[0].NETWORK_INTERFACES.GNB_IPV4_ADDRESS_FOR_NG_AMF' "$CU_N2_N3_CIDR"
       '--gNBs.[0].NETWORK_INTERFACES.GNB_IPV4_ADDRESS_FOR_NGU' "$CU_N2_N3_CIDR"
+      --telnetsrv --telnetsrv.shrmod ci --telnetsrv.listenaddr "$F1_CU_IP"
+
     )
     ;;
   du1|du2)

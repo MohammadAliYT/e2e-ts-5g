@@ -1,0 +1,44 @@
+diff --git a/examples/xApp/c/rc_handover/xapp_rc_handover.c b/examples/xApp/c/rc_handover/xapp_rc_handover.c
+index e64839fe..c6bb0385 100644
+--- a/examples/xApp/c/rc_handover/xapp_rc_handover.c
++++ b/examples/xApp/c/rc_handover/xapp_rc_handover.c
+@@ -377,10 +377,37 @@ void sm_cb_rc(sm_ag_if_rd_t const* rd)
+     sem_post(&rc_ind_sem);
+     return;
+   }
+-  assert(msg->sz_seq_ue_info == 1 && "One UE supported.");
++  // assert(msg->sz_seq_ue_info == 1 && "One UE supported.");
++
++  // ue_cell.connected = true;
++  // const seq_ue_info_t* ue_info = &msg->seq_ue_info[0];
++
++  //claude code
++  /* e2e-ts: select the UE by CU UE ID (env HO_CU_UE_ID), default: first UE */
++  size_t sel = 0;
++  const char* want = getenv("HO_CU_UE_ID");
++  if (want != NULL) {
++    sel = msg->sz_seq_ue_info;
++    for (size_t k = 0; k < msg->sz_seq_ue_info; k++) {
++      const ue_id_e2sm_t* id = &msg->seq_ue_info[k].ue_id;
++      if (id->type == GNB_UE_ID_E2SM && id->gnb.gnb_cu_ue_f1ap_lst != NULL
++          && id->gnb.gnb_cu_ue_f1ap_lst[0] == (uint32_t)atoi(want)) {
++        sel = k;
++        break;
++      }
++    }
++    if (sel == msg->sz_seq_ue_info) {
++      printf("CU UE ID %s not found among %zu UEs\n", want, msg->sz_seq_ue_info);
++      ue_cell.connected = false;
++      sem_post(&rc_ind_sem);
++      return;
++    }
++  }
++  printf("Selected UE %zu of %zu (CU UE ID %s)\n", sel + 1, msg->sz_seq_ue_info, want ? want : "first");
+ 
+   ue_cell.connected = true;
+-  const seq_ue_info_t* ue_info = &msg->seq_ue_info[0];
++  const seq_ue_info_t* ue_info = &msg->seq_ue_info[sel];
++  //claude before this
+   ue_cell.ue_id = cp_ue_id_e2sm(&ue_info->ue_id);
+ 
+   ue_cell.serving_cell = cp_nr_cgi(&ue_info->cell_global_id.nr_cgi);
