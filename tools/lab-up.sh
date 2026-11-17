@@ -10,7 +10,11 @@ WEB=$root/upstream/free5gc/webconsole
 L=$root/results/lab; mkdir -p "$L"
 sudo -v || exit 1
 
-bg() { local n=$1; shift; nohup "$@" >"$L/$n.out" 2>&1 </dev/null & echo "  start $n"; }
+# bg() { local n=$1; shift; nohup "$@" >"$L/$n.out" 2>&1 </dev/null & echo "  start $n"; }
+
+# claude suggestion: use setsid to avoid SIGHUP killing the process when lab-up.sh exits
+bg()  { local n=$1; shift; sudo HOME="$HOME" setsid -f nohup "$@" >"$L/$n.out" 2>&1 </dev/null; echo "  start $n"; }
+bgu() { local n=$1; shift; nohup "$@" >"$L/$n.out" 2>&1 </dev/null & echo "  start $n"; }
 wait_for() { # <label> <timeout s> <test>
   for ((i=0; i<$2; i++)); do bash -c "$3" >/dev/null 2>&1 && { echo "  ok    $1"; return 0; }; sleep 1; done
   echo "  FAIL  $1 - see $L/"; exit 1; }
@@ -21,12 +25,13 @@ pgrep -f 'nr-(ue)?softmodem' >/dev/null && { echo "RAN already running - run too
 
 echo "== core"
 if ss -HlnS | grep -q ':38412'; then echo "  core already running"; else
-  bg core Core/run-core.sh
+  # bg core Core/run-core.sh
+  bgu core Core/run-core.sh
   wait_for "AMF (NGAP 38412)" 60 "ss -HlnS | grep -q ':38412'"
   sleep 3; fi
 if ss -Hltn | grep -q ':5000 '; then echo "  webconsole already running"; else
-  (cd "$WEB" && bg webconsole ./bin/webconsole); fi
-
+  # (cd "$WEB" && bg webconsole ./bin/webconsole); fi
+  (cd "$WEB" && bgu webconsole ./bin/webconsole); fi
 echo "== RIC (in $RAN_NS)"
 if inran ss -HlnS | grep -q ':36421'; then echo "  RIC already running"; else
   pgrep -f '[n]earRT-RIC' >/dev/null && { echo "RIC running outside $RAN_NS - run tools/lab-down.sh"; exit 1; }
