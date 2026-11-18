@@ -22,6 +22,7 @@ stop UE1 'nr-uesoftmodem.*UE/ue1\.'
 stop UE2 'nr-uesoftmodem.*UE/ue2\.'
 stop DU2 'nr-softmodem.*du2\.'
 stop DU1 'nr-softmodem.*du1\.'
+stop HUB 'rfsim-[h]ub'
 stop CU  'nr-softmodem.*cu\.'
 stop RIC '[n]earRT-RIC'
 if [[ ${1:-} == all ]]; then

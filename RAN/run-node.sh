@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Start the CU or a DU in the RAN namespace.
-# Usage: run-node.sh <cu|du1|du2> [gate|gate-samefreq|gate-samefreq-ssb0]
+# Usage: run-node.sh <cu|du1|du2> [gate|gate-samefreq|gate-samefreq-ssb0|hub]
 #   gate:               the DU is an RFsim CLIENT of UE1 (UE1 is the RFsim server), single-radio gate test.
 #   gate-samefreq:      like gate, plus DU2 on DU1's frequency and the matching CU neighbour config.
 #   gate-samefreq-ssb0: like gate-samefreq, plus DU2 sends its SSB at index 0 (same as DU1).
+#   hub:                the DU is an RFsim CLIENT of tools/rfsim-hub (DU1 -> port 4043, DU2 -> 4044);
+#                       both DUs on 630048 with SSB index 0, CU with same-frequency neighbours.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 source "$root/RAN/interfaces/lab.env"
@@ -17,7 +19,7 @@ case "$node" in
     config=cu/cu.conf
     case "$variant" in
       ""|gate) ;;
-      gate-samefreq|gate-samefreq-ssb0) config=cu/cu.samefreq.conf ;;
+      gate-samefreq|gate-samefreq-ssb0|hub) config=cu/cu.samefreq.conf ;;
       *) printf 'Unknown variant: %s\n' "$variant" >&2; exit 1 ;;
     esac
     args=(
@@ -30,8 +32,8 @@ case "$node" in
     ;;
   du1|du2)
     config="du/$node.conf"
-    ip=$F1_DU1_IP; port=$DU1_RFSIM_PORT
-    if [[ "$node" == du2 ]]; then ip=$F1_DU2_IP; port=$DU2_RFSIM_PORT; fi
+    ip=$F1_DU1_IP; port=$DU1_RFSIM_PORT; hub_port=4043
+    if [[ "$node" == du2 ]]; then ip=$F1_DU2_IP; port=$DU2_RFSIM_PORT; hub_port=4044; fi
     args=(
       --rfsim
       '--MACRLCs.[0].local_n_address' "$ip"
@@ -43,6 +45,11 @@ case "$node" in
         args+=('--rfsimulator.[0].serveraddr' "$UE1_IP" '--rfsimulator.[0].serverport' "$gate_port")
         if [[ $node == du2 && $variant == gate-samefreq ]];      then config=du/du2.samefreq.conf; fi
         if [[ $node == du2 && $variant == gate-samefreq-ssb0 ]]; then config=du/du2.samefreq-ssb0.conf; fi
+        ;;
+      hub)
+        # the hub runs in the same namespace as the DUs
+        args+=('--rfsimulator.[0].serveraddr' 127.0.0.1 '--rfsimulator.[0].serverport' "$hub_port")
+        if [[ $node == du2 ]]; then config=du/du2.samefreq-ssb0.conf; fi
         ;;
       *) printf 'Unknown variant: %s\n' "$variant" >&2; exit 1 ;;
     esac
