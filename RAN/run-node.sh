@@ -1,19 +1,31 @@
 #!/usr/bin/env bash
+# Start the CU or a DU in the RAN namespace.
+# Usage: run-node.sh <cu|du1|du2> [gate|gate-samefreq|gate-samefreq-ssb0]
+#   gate:               the DU is an RFsim CLIENT of UE1 (UE1 is the RFsim server), single-radio gate test.
+#   gate-samefreq:      like gate, plus DU2 on DU1's frequency and the matching CU neighbour config.
+#   gate-samefreq-ssb0: like gate-samefreq, plus DU2 sends its SSB at index 0 (same as DU1).
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 source "$root/RAN/interfaces/lab.env"
 
 node="${1:?Pass cu, du1, or du2}"
+variant="${2:-}"
+gate_port=4043   # RFsim port of UE1 in gate mode
+
 case "$node" in
   cu)
     config=cu/cu.conf
+    case "$variant" in
+      ""|gate) ;;
+      gate-samefreq|gate-samefreq-ssb0) config=cu/cu.samefreq.conf ;;
+      *) printf 'Unknown variant: %s\n' "$variant" >&2; exit 1 ;;
+    esac
     args=(
       '--gNBs.[0].local_s_address' "$F1_CU_IP"
       '--gNBs.[0].amf_ip_address.[0].ipv4' "$AMF_IP"
       '--gNBs.[0].NETWORK_INTERFACES.GNB_IPV4_ADDRESS_FOR_NG_AMF' "$CU_N2_N3_CIDR"
       '--gNBs.[0].NETWORK_INTERFACES.GNB_IPV4_ADDRESS_FOR_NGU' "$CU_N2_N3_CIDR"
       --telnetsrv --telnetsrv.shrmod ci --telnetsrv.listenaddr "$F1_CU_IP"
-
     )
     ;;
   du1|du2)
@@ -24,9 +36,16 @@ case "$node" in
       --rfsim
       '--MACRLCs.[0].local_n_address' "$ip"
       '--MACRLCs.[0].remote_n_address' "$F1_CU_IP"
-      # --rfsimulator.serverport "$port"
-      --rfsimulator.[0].serverport "$port"
     )
+    case "$variant" in
+      "") args+=('--rfsimulator.[0].serverport' "$port") ;;
+      gate|gate-samefreq|gate-samefreq-ssb0)
+        args+=('--rfsimulator.[0].serveraddr' "$UE1_IP" '--rfsimulator.[0].serverport' "$gate_port")
+        if [[ $node == du2 && $variant == gate-samefreq ]];      then config=du/du2.samefreq.conf; fi
+        if [[ $node == du2 && $variant == gate-samefreq-ssb0 ]]; then config=du/du2.samefreq-ssb0.conf; fi
+        ;;
+      *) printf 'Unknown variant: %s\n' "$variant" >&2; exit 1 ;;
+    esac
     ;;
   *) printf 'Unknown node: %s\n' "$node" >&2; exit 1 ;;
 esac

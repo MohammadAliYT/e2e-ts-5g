@@ -13,11 +13,16 @@ stop() { # <label> <pattern>
   sudo pkill -KILL -f "$2"; sleep 1; echo "  kill  $1 (ignored TERM)"; }
 
 stop xApps '[x]app_'
-stop UE1 'nr-uesoftmodem.*ue1\.conf'
-stop UE2 'nr-uesoftmodem.*ue2\.conf'
-stop DU2 'nr-softmodem.*du2\.conf'
-stop DU1 'nr-softmodem.*du1\.conf'
-stop CU  'nr-softmodem.*cu\.conf'
+# stop UE1 'nr-uesoftmodem.*ue1\.conf'
+# stop UE2 'nr-uesoftmodem.*ue2\.conf'
+# stop DU2 'nr-softmodem.*du2\.conf'
+# stop DU1 'nr-softmodem.*du1\.conf'
+# stop CU  'nr-softmodem.*cu\.conf'
+stop UE1 'nr-uesoftmodem.*UE/ue1\.'
+stop UE2 'nr-uesoftmodem.*UE/ue2\.'
+stop DU2 'nr-softmodem.*du2\.'
+stop DU1 'nr-softmodem.*du1\.'
+stop CU  'nr-softmodem.*cu\.'
 stop RIC '[n]earRT-RIC'
 if [[ ${1:-} == all ]]; then
   stop webconsole 'bin/[w]ebconsole'
