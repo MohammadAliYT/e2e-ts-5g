@@ -11,7 +11,10 @@
 # LAB_MODE=hub:                relay hub (tools/rfsim-hub): every UE has one radio that hears every DU.
 #                              Order core -> RIC -> CU -> hub -> DU1 -> DU2 -> UE1 -> UE2.
 #   HUB_DUS=1|2, HUB_UES=1|2   number of DUs / UEs (default 2 / 2)
-#   HUB_INIT='cmd;cmd'         hub commands sent before the DUs start, e.g. 'loss ue1 du2 10;loss ue2 du1 10'
+#   HUB_NOISE=<dBFS>|off       receiver noise floor on every hub node (default -75: cell centre MCS 28,
+#                              MCS 0 at ~20 dB path loss, link degraded at ~25 dB; results/hub-tel/)
+#   HUB_INIT='cmd;cmd'         hub commands sent before the DUs start
+#                              (default 'loss ue1 du2 10;loss ue2 du1 10': UE1 near DU1, UE2 near DU2)
 # UE1_EXTRA='...': extra nr-uesoftmodem options for UE1 in gate and hub modes (e.g. --log_config.nr_rrc_log_level debug)
 set -uo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -86,12 +89,17 @@ elif [[ $mode == hub ]]; then
   echo "== hub ($ndu DU, $nue UE)"
   bg hub sudo ip netns exec "$RAN_NS" stdbuf -oL "$HUB" "${hub_args[@]}" --ctrl "$hub_ctrl"
   wait_for "hub (control port $hub_ctrl)" 10 "sudo ip netns exec $RAN_NS ss -Hltn | grep -q ':$hub_ctrl '"
-  if [[ -n ${HUB_INIT:-} ]]; then
-    IFS=';' read -r -a cmds <<<"$HUB_INIT"
-    for c in "${cmds[@]}"; do
-      printf '%s\n' "$c" | sudo ip netns exec "$RAN_NS" nc -q 1 127.0.0.1 "$hub_ctrl" | sed 's/^/  hub: /'
-    done
+  hub_cmds=()
+  if [[ ${HUB_NOISE:--75} != off ]]; then
+    for ((j=1; j<=ndu; j++)); do hub_cmds+=("noise du$j ${HUB_NOISE:--75}"); done
+    for ((k=1; k<=nue; k++)); do hub_cmds+=("noise ue$k ${HUB_NOISE:--75}"); done
   fi
+  IFS=';' read -r -a cmds <<<"${HUB_INIT-loss ue1 du2 10;loss ue2 du1 10}"
+  hub_cmds+=("${cmds[@]}")
+  for c in "${hub_cmds[@]}"; do
+    [[ -n $c ]] || continue
+    printf '%s\n' "$c" | sudo ip netns exec "$RAN_NS" nc -q 1 127.0.0.1 "$hub_ctrl" | sed "s/^/  hub: $c -> /"
+  done
   for ((j=1; j<=ndu; j++)); do
     bg du$j RAN/run-node.sh du$j hub
     wait_for "DU$j connected to hub" 40 "$(conn_test "$RAN_NS" $((4042+j)) 1)"
