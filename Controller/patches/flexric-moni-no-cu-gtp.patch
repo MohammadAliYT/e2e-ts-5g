@@ -1,0 +1,39 @@
+diff --git a/examples/xApp/c/monitor/xapp_gtp_mac_rlc_pdcp_moni.c b/examples/xApp/c/monitor/xapp_gtp_mac_rlc_pdcp_moni.c
+index b992c574..740a8bc5 100644
+--- a/examples/xApp/c/monitor/xapp_gtp_mac_rlc_pdcp_moni.c
++++ b/examples/xApp/c/monitor/xapp_gtp_mac_rlc_pdcp_moni.c
+@@ -149,11 +149,9 @@ int main(int argc, char *argv[])
+       assert(gtp_handle[i].success == true);
+ 
+     } else if(n->id.type ==  ngran_gNB_CU || n->id.type ==  ngran_gNB_CUUP){
+-      pdcp_handle[i] = report_sm_xapp_api(&nodes.n[i].id, 144, (void*)i_2, sm_cb_pdcp);
+-      assert(pdcp_handle[i].success == true);
+-
+-      gtp_handle[i] = report_sm_xapp_api(&nodes.n[i].id, 148, (void*)i_3, sm_cb_gtp);
+-      assert(gtp_handle[i].success == true);
++      /* e2e-ts: no PDCP/GTP subscription on the CU - read_gtp_sm() asserts one QoS flow
++       * per PDU session (ran_func_gtp.c:56) and our sessions have 2 DRBs -> CU abort */
++      printf("CU node %d: no PDCP/GTP subscription (e2e-ts)\n", i);
+ 
+     } else if(n->id.type == ngran_gNB_DU){
+       mac_handle[i] = report_sm_xapp_api(&nodes.n[i].id, 142, (void*)i_0, sm_cb_mac);
+diff --git a/examples/xApp/c/monitor/xapp_kpm_moni.c b/examples/xApp/c/monitor/xapp_kpm_moni.c
+index 040a0288..0f56f2ff 100644
+--- a/examples/xApp/c/monitor/xapp_kpm_moni.c
++++ b/examples/xApp/c/monitor/xapp_kpm_moni.c
+@@ -276,11 +276,14 @@ test_info_lst_t filter_predicate(test_cond_type_e type, test_cond_e cond, int va
+ 
+   dst.test_cond_value->octet_string_value = calloc(1, sizeof(byte_array_t));
+   assert(dst.test_cond_value->octet_string_value != NULL && "Memory exhausted");
+-  const size_t len_nssai = 1;
++  const size_t len_nssai = 4; // e2e-ts: SST + SD 010203
+   dst.test_cond_value->octet_string_value->len = len_nssai;
+   dst.test_cond_value->octet_string_value->buf = calloc(len_nssai, sizeof(uint8_t));
+   assert(dst.test_cond_value->octet_string_value->buf != NULL && "Memory exhausted");
+   dst.test_cond_value->octet_string_value->buf[0] = value;
++  dst.test_cond_value->octet_string_value->buf[1] = 0x01;
++  dst.test_cond_value->octet_string_value->buf[2] = 0x02;
++  dst.test_cond_value->octet_string_value->buf[3] = 0x03;
+ 
+   return dst;
+ }
