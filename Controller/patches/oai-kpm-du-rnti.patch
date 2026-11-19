@@ -1,0 +1,40 @@
+diff --git a/openair2/E2AP/RAN_FUNCTION/O-RAN/ran_e2sm_ue_id.c b/openair2/E2AP/RAN_FUNCTION/O-RAN/ran_e2sm_ue_id.c
+index dc631d9..b52f163 100644
+--- a/openair2/E2AP/RAN_FUNCTION/O-RAN/ran_e2sm_ue_id.c
++++ b/openair2/E2AP/RAN_FUNCTION/O-RAN/ran_e2sm_ue_id.c
+@@ -58,7 +58,7 @@ ue_id_e2sm_t fill_e2sm_cu_ue_id_data(const gNB_RRC_UE_t *rrc_ue_context, const u
+   return ue_id;
+ }
+ 
+-ue_id_e2sm_t fill_e2sm_du_ue_id_data(__attribute__((unused))const gNB_RRC_UE_t *rrc_ue_context, const uint32_t rrc_ue_id, __attribute__((unused))const ue_id_t cucp_ue_id)
++ue_id_e2sm_t fill_e2sm_du_ue_id_data(__attribute__((unused))const gNB_RRC_UE_t *rrc_ue_context, const uint32_t rrc_ue_id, const ue_id_t cucp_ue_id)
+ {
+   ue_id_e2sm_t ue_id = {0};
+ 
+@@ -72,9 +72,11 @@ ue_id_e2sm_t fill_e2sm_du_ue_id_data(__attribute__((unused))const gNB_RRC_UE_t *
+   // 6.2.3.25
+   // RAN UE ID
+   // Optional
++  // e2e-ts: KPM on the DU passes the RNTI here (3rd argument), so that an xApp can link
++  // KPM / RC (CU UE ID) and the MAC service model (RNTI). Other callers pass 0 -> CU UE ID as before.
+   ue_id.gnb_du.ran_ue_id = calloc(1, sizeof(uint64_t));
+   assert(ue_id.gnb_du.ran_ue_id != NULL);
+-  *ue_id.gnb_du.ran_ue_id = rrc_ue_id;
++  *ue_id.gnb_du.ran_ue_id = cucp_ue_id != 0 ? cucp_ue_id : rrc_ue_id;
+ 
+   return ue_id;
+ }
+diff --git a/openair2/E2AP/RAN_FUNCTION/O-RAN/ran_func_kpm.c b/openair2/E2AP/RAN_FUNCTION/O-RAN/ran_func_kpm.c
+index ddca4d7..ac014f1 100644
+--- a/openair2/E2AP/RAN_FUNCTION/O-RAN/ran_func_kpm.c
++++ b/openair2/E2AP/RAN_FUNCTION/O-RAN/ran_func_kpm.c
+@@ -288,7 +288,8 @@ static arr_ue_id_t filter_ues_by_s_nssai_in_du_or_monolithic(const test_info_lst
+       if (nssai_matches(c->nssai, sst, sd)) {
+         if (node_type == ngran_gNB_DU) {
+           f1_ue_data_t rrc_ue_id = du_get_f1_ue_data(ue->rnti); // gNB CU UE ID = rrc_ue_id
+-          arr_ue_id.ue_id[arr_ue_id.sz] = fill_ue_id_data[ngran_gNB_DU](NULL, rrc_ue_id.secondary_ue, 0);
++          // arr_ue_id.ue_id[arr_ue_id.sz] = fill_ue_id_data[ngran_gNB_DU](NULL, rrc_ue_id.secondary_ue, 0);
++          arr_ue_id.ue_id[arr_ue_id.sz] = fill_ue_id_data[ngran_gNB_DU](NULL, rrc_ue_id.secondary_ue, ue->rnti);
+         } else {
+           rrc_gNB_ue_context_t* rrc_ue_context = rrc_gNB_get_ue_context_by_rnti(RC.nrrrc[0], -1, ue->rnti);
+           /* UE has no AMF UE NGAP ID yet => can't send message */

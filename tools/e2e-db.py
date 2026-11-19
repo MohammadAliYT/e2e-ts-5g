@@ -9,12 +9,27 @@ import os
 import sqlite3
 import sys
 
-dbs = [
-    f
-    for f in glob.glob("/tmp/xapp_db_*")
-    if not f.endswith(("-journal", "-wal", "-shm"))
-]
-db = sys.argv[1] if len(sys.argv) > 1 else max(dbs, key=os.path.getmtime)
+
+def has_mac(
+    f,
+):  # database with MAC rows (the KPM monitor writes its own database without them)
+    try:
+        c = sqlite3.connect(f"file:{f}?mode=ro", uri=True)
+        return c.execute("SELECT 1 FROM MAC_UE LIMIT 1").fetchone() is not None
+    except sqlite3.Error:
+        return False
+
+
+dbs = sorted(
+    (
+        f
+        for f in glob.glob("/tmp/xapp_db_*")
+        if not f.endswith(("-journal", "-wal", "-shm"))
+    ),
+    key=os.path.getmtime,
+    reverse=True,
+)
+db = sys.argv[1] if len(sys.argv) > 1 else next((f for f in dbs if has_mac(f)), dbs[0])
 con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
 tables = [
     r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")
@@ -37,14 +52,20 @@ want = [
     "ul_bler",
     "pusch_snr",
     "pucch_snr",
-    "wb_cqi",
     "dl_sched_rb",
     "ul_sched_rb",
 ]
+# throughput from the cumulative byte counters: (last - first) * 8 / interval, in Mbit/s
+rates = {
+    "dl_Mbps": "dl_aggr_tbs",
+    "ul_Mbps": "ul_aggr_tbs",
+    "dlsdu_Mbps": "dl_aggr_bytes_sdus",
+    "ulsdu_Mbps": "ul_aggr_bytes_sdus",
+}
 ts = next((c for c in cols if "tstamp" in c.lower()), None)
 node = (
     "nb_id" if "nb_id" in cols else None
-)  # DU1 = 3584, DU2 = 3585; cu_du_id is the same for both
+)  # DU1 = 3584 (0xe00), DU2 = 3585 (0xe01); cu_du_id is the same for both
 show = [c for c in want if c in cols]
 if ts is None or "rnti" not in cols or not show:
     sys.exit(
@@ -52,11 +73,17 @@ if ts is None or "rnti" not in cols or not show:
     )
 
 key = [c for c in (node, "rnti") if c]
+rate_cols = [(n, c) for n, c in rates.items() if c in cols]
+exprs = [f"AVG({c})" for c in show] + [
+    f"(MAX({c}) - MIN({c})) * 8.0 / NULLIF(MAX({ts}) - MIN({ts}), 0)"
+    for _, c in rate_cols
+]  # bytes/us*8 = Mbit/s
 q = (
     f'SELECT {", ".join(key)}, CAST(({ts} - (SELECT MIN({ts}) FROM "{mac}")) / 5000000 AS INT) AS t5, '
-    + ", ".join(f"AVG({c})" for c in show)
+    + ", ".join(exprs)
     + f' FROM "{mac}" GROUP BY {", ".join(key)}, t5 ORDER BY {", ".join(key)}, t5'
 )
+show = show + [n for n, _ in rate_cols]
 print("\n" + " ".join(f"{c:>9s}" for c in key + ["t[s]"] + show))
 for r in con.execute(q):
     k, t5, vals = r[: len(key)], r[len(key)], r[len(key) + 1 :]
