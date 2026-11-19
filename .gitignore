@@ -8,3 +8,4 @@
 *.pcap
 *.pcapng
 tools/cfgcheck
+tools/rfsim-hub/rfsim-hub
