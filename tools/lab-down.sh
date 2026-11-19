@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Stop in order: xApps -> UE1, UE2 -> DU2 -> DU1 -> CU -> RIC  (core keeps running)
+# Stop in order: xApps -> UE1, UE2 -> DU2 -> DU1 -> hub -> CU -> RIC  (core keeps running)
 # tools/lab-down.sh all  -> also webconsole + core
 set -uo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -13,11 +13,6 @@ stop() { # <label> <pattern>
   sudo pkill -KILL -f "$2"; sleep 1; echo "  kill  $1 (ignored TERM)"; }
 
 stop xApps '[x]app_'
-# stop UE1 'nr-uesoftmodem.*ue1\.conf'
-# stop UE2 'nr-uesoftmodem.*ue2\.conf'
-# stop DU2 'nr-softmodem.*du2\.conf'
-# stop DU1 'nr-softmodem.*du1\.conf'
-# stop CU  'nr-softmodem.*cu\.conf'
 stop UE1 'nr-uesoftmodem.*UE/ue1\.'
 stop UE2 'nr-uesoftmodem.*UE/ue2\.'
 stop DU2 'nr-softmodem.*du2\.'
