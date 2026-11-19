@@ -1,14 +1,11 @@
-/* output/csv.h - one CSV row per UE per second, plus a short status line on stderr.
+/* output/csv.h - the CSV file and its once-per-second writer thread.
  *
- * A writer thread wakes at every full wall-clock second, turns each UE's 1 s window
- * into a row (Mbit/s from RLC bytes, MAC averages, last KPM values, cell PRB = sum
- * of the UEs' KPM PRB values), and starts a new window.
- * Columns: see CSV_HEADER in csv.c.
+ * At every full wall-clock second the writer takes the lock, writes one row per active
+ * UE of every DU (with the CU values of the same CU UE ID joined in), and starts a new
+ * window in both tables. Column layout: output/csv_row.c.
  */
 #ifndef E2E_CTRL_CSV_H
 #define E2E_CTRL_CSV_H
-
-#include <stddef.h>
 
 #include "e2/nodes.h"
 
@@ -16,8 +13,8 @@
  * Exits the program if the file cannot be created. */
 void csv_open(void);
 
-/* Starts the writer thread. dus must stay valid until csv_stop(). */
-void csv_start(size_t n_du, du_info_t const* dus);
+/* Starts the writer thread. ran must stay valid until csv_stop(). */
+void csv_start(ran_nodes_t const* ran);
 
 /* Stops the writer thread and closes the file. */
 void csv_stop(void);

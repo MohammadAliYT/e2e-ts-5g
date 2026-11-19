@@ -7,13 +7,19 @@ add_executable(e2e_ctrl
   main.c
   e2/nodes.c
   e2/f1_setup.c
+  e2/ran_func.c
   e2/kpm_sub.c
-  e2/subscribe.c
+  e2/subscribe_du.c
+  e2/subscribe_cu.c
   collect/mac.c
   collect/rlc.c
+  collect/kpm_values.c
   collect/kpm_du.c
+  collect/kpm_cu.c
   state/ue_table.c
+  state/cu_table.c
   output/csv.c
+  output/csv_row.c
   )
 
 # lets every module include "config.h", "e2/nodes.h", ... from this folder

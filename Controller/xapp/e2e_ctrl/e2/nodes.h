@@ -1,8 +1,9 @@
-/* e2/nodes.h - find the DUs among the connected E2 nodes.
+/* e2/nodes.h - sort the connected E2 nodes into the CU and the DUs.
  *
- * Lists every E2 node the RIC knows, keeps the gNB-DUs (stage 1: no subscription on
- * the CU), numbers them by ascending nb_id (DU1 = 3584, DU2 = 3585 in the lab) and
- * reads each DU's NR Cell ID from its F1 Setup Request.
+ * Lists every E2 node the RIC knows. DUs are numbered by ascending nb_id
+ * (DU1 = 3584, DU2 = 3585 in the lab) and get their NR Cell ID from the F1 Setup
+ * Request. The CU (gNB-CU, one in the lab) is kept for its KPM reports now and for
+ * RC handover control later.
  */
 #ifndef E2E_CTRL_NODES_H
 #define E2E_CTRL_NODES_H
@@ -21,7 +22,19 @@ typedef struct {
   uint64_t nr_cell_id;
 } du_info_t;
 
-/* Fills dus[0..n-1] (DU1 first) from the node list and returns n (at most MAX_DU). */
-size_t nodes_find_dus(e2_node_arr_xapp_t* nodes, du_info_t dus[MAX_DU]);
+typedef struct {
+  e2_node_connected_xapp_t* node; /* same lifetime as above */
+  uint32_t nb_id;
+} cu_info_t;
+
+typedef struct {
+  du_info_t du[MAX_DU]; /* du[0] = DU1 */
+  size_t n_du;
+  bool has_cu;
+  cu_info_t cu;
+} ran_nodes_t;
+
+/* Fills ran from the node list and prints one line per node. */
+void nodes_find(e2_node_arr_xapp_t* nodes, ran_nodes_t* ran);
 
 #endif

@@ -1,4 +1,4 @@
-/* e2/nodes.c - E2 node list -> sorted DU list with cell IDs. See nodes.h. */
+/* e2/nodes.c - E2 node list -> CU + sorted DU list with cell IDs. See nodes.h. */
 #include "e2/nodes.h"
 
 #include <inttypes.h>
@@ -35,33 +35,50 @@ static void read_cell_id(du_info_t* d)
       d->has_cell = f1_setup_cell_id(n->cca[j].e2_node_comp_conf.request, &d->nr_cell_id);
 }
 
-size_t nodes_find_dus(e2_node_arr_xapp_t* nodes, du_info_t dus[MAX_DU])
+/* Sort one node into ran: DU, CU, or ignored */
+static void add_node(ran_nodes_t* ran, e2_node_connected_xapp_t* n)
 {
-  size_t n_du = 0;
+  uint32_t const nb_id = n->id.nb_id.nb_id;
+  if (n->id.type == ngran_gNB_DU) {
+    if (ran->n_du == MAX_DU) {
+      printf("[e2e_ctrl]   more than %d DUs, ignored\n", MAX_DU);
+      return;
+    }
+    ran->du[ran->n_du++] = (du_info_t){.node = n, .nb_id = nb_id};
+  } else if (n->id.type == ngran_gNB_CU) {
+    if (ran->has_cu) {
+      printf("[e2e_ctrl]   second CU, ignored\n");
+      return;
+    }
+    ran->has_cu = true;
+    ran->cu = (cu_info_t){.node = n, .nb_id = nb_id};
+  } else {
+    printf("[e2e_ctrl]   neither gNB-CU nor gNB-DU, ignored\n");
+  }
+}
+
+void nodes_find(e2_node_arr_xapp_t* nodes, ran_nodes_t* ran)
+{
+  *ran = (ran_nodes_t){0};
   printf("[e2e_ctrl] connected E2 nodes: %u\n", nodes->len);
   for (size_t i = 0; i < nodes->len; i++) {
     e2_node_connected_xapp_t* n = &nodes->n[i];
     printf("[e2e_ctrl] node %zu: %s nb_id %u, %zu RAN functions\n", i, node_type_name(n->id.type), n->id.nb_id.nb_id, n->len_rf);
-    if (n->id.type != ngran_gNB_DU) {
-      printf("[e2e_ctrl]   not a DU: no subscription (stage 1; never GTP/PDCP on the CU)\n");
-      continue;
-    }
-    if (n_du == MAX_DU) {
-      printf("[e2e_ctrl]   more than %d DUs, ignored\n", MAX_DU);
-      continue;
-    }
-    dus[n_du++] = (du_info_t){.node = n, .nb_id = n->id.nb_id.nb_id};
+    add_node(ran, n);
   }
 
   /* DU numbering by ascending nb_id: DU1 = 3584 (0xe00), DU2 = 3585 (0xe01) in this lab */
-  qsort(dus, n_du, sizeof(dus[0]), cmp_nb_id);
-  for (size_t di = 0; di < n_du; di++) {
-    du_info_t* d = &dus[di];
+  qsort(ran->du, ran->n_du, sizeof(ran->du[0]), cmp_nb_id);
+  for (size_t di = 0; di < ran->n_du; di++) {
+    du_info_t* d = &ran->du[di];
     read_cell_id(d);
     if (d->has_cell)
       printf("[e2e_ctrl] DU%zu = nb_id %u (0x%x), NR cell ID %" PRIu64 "\n", di + 1, d->nb_id, d->nb_id, d->nr_cell_id);
     else
       printf("[e2e_ctrl] DU%zu = nb_id %u (0x%x), NR cell ID unknown (no F1 Setup in component config)\n", di + 1, d->nb_id, d->nb_id);
   }
-  return n_du;
+  if (ran->has_cu)
+    printf("[e2e_ctrl] CU  = nb_id %u (0x%x)\n", ran->cu.nb_id, ran->cu.nb_id);
+  else
+    printf("[e2e_ctrl] no CU connected\n");
 }

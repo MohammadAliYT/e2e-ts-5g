@@ -12,7 +12,12 @@
 
 /* RAN function IDs (service models):
  * src/sm/mac_sm/mac_sm_id.h, rlc_sm/rlc_sm_id.h, kpm_sm/kpm_sm_v02.03/kpm_sm_id.h */
-enum { RF_MAC = 142, RF_RLC = 143, RF_KPM = 2 };
+enum { RF_MAC = 142, RF_RLC = 143, RF_KPM = 2, RF_RC = 3 };
+
+/* NEVER subscribe these on the CU: GTP (148) crashed the CU on 19 Nov (read_gtp_sm asserts one
+ * QoS flow per PDU session, the lab has 2 DRBs); PDCP (144) not checked for the same problem.
+ * e2/subscribe_cu.c refuses them. */
+enum { RF_PDCP = 144, RF_GTP = 148 };
 
 /* Report periods. MAC/RLC accept only "1_ms", "2_ms", "5_ms", "10_ms" (mac_sm_ric.c, rlc_sm_ric.c) */
 #define MAC_INTERVAL "10_ms"

@@ -1,8 +1,9 @@
 /* collect/kpm_du.h - KPM REPORT style 4 (per UE) from a DU -> UE table.
  *
  * Gives the UE's CU UE ID (with oai-kpm-du-rnti.patch the RNTI is in ran_ue_id),
- * and DRB.UEThpDl/Ul (kbps), RRU.PrbTotDl/Ul (% of cell PRBs). Other measurement
- * names are ignored (phase 1 adds DRB.RlcSduDelayDl).
+ * DRB.UEThpDl/Ul (kbps), RRU.PrbTotDl/Ul (% of cell PRBs) and DRB.RlcSduDelayDl
+ * (us, DRB 1 only - OAI ran_func_kpm_subs.c). These are all 5 measurements the OAI
+ * w46 DU offers for style 4.
  */
 #ifndef E2E_CTRL_COLLECT_KPM_DU_H
 #define E2E_CTRL_COLLECT_KPM_DU_H

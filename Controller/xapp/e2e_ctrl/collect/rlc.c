@@ -16,6 +16,18 @@ static bool counter_delta(uint32_t cur, uint32_t prev, uint32_t* delta)
   return false;
 }
 
+/* DL queue sample (every report, also the first one) */
+static void add_queue_sample(ue_t* u, rlc_radio_bearer_stats_t const* rb)
+{
+  u->w_n_q++;
+  u->w_dl_hol_us_sum += rb->txsdu_wt_us;
+  u->w_dl_buf_bytes_sum += rb->txbuf_occ_bytes;
+  if (rb->txsdu_wt_us > u->w_dl_hol_us_max)
+    u->w_dl_hol_us_max = rb->txsdu_wt_us;
+  if (rb->txbuf_occ_bytes > u->w_dl_buf_bytes_max)
+    u->w_dl_buf_bytes_max = rb->txbuf_occ_bytes;
+}
+
 /* One bearer report for one UE */
 static void add_bearer(ue_t* u, rlc_radio_bearer_stats_t const* rb, int64_t ts)
 {
@@ -71,6 +83,8 @@ void collect_rlc(size_t di, sm_ag_if_rd_t const* rd)
     if (u == NULL)
       continue;
     u->last_seen_us = now;
+    if (rb->rbid == DL_DRB)
+      add_queue_sample(u, rb);
     add_bearer(u, rb, ts);
   }
   ue_table_unlock();

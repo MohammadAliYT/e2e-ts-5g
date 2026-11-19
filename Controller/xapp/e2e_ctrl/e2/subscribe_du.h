@@ -1,10 +1,10 @@
-/* e2/subscribe.h - E2 REPORT subscriptions per DU: MAC, RLC and KPM style 4.
+/* e2/subscribe_du.h - E2 REPORT subscriptions on a DU: MAC, RLC and KPM style 4.
  *
  * Each subscription delivers its reports to the matching collect/ module, tagged
  * with the DU index (0 = DU1), so the UE table knows which DU a report came from.
  */
-#ifndef E2E_CTRL_SUBSCRIBE_H
-#define E2E_CTRL_SUBSCRIBE_H
+#ifndef E2E_CTRL_SUBSCRIBE_DU_H
+#define E2E_CTRL_SUBSCRIBE_DU_H
 
 #include <stddef.h>
 

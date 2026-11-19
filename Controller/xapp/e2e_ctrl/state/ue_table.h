@@ -35,12 +35,18 @@ typedef struct {
   uint32_t w_n_rlc;      /* DL (DRB 1) reports */
   uint32_t w_rlc_resets; /* counter resets seen (new RLC entity) */
 
+  /* DL queue on DRB 1, sampled with every RLC report (~100 per window) */
+  uint32_t w_n_q;
+  double w_dl_hol_us_sum, w_dl_buf_bytes_sum; /* head-of-line delay (txsdu_wt_us), queued bytes */
+  uint32_t w_dl_hol_us_max, w_dl_buf_bytes_max;
+
   double w_dl_mcs, w_ul_mcs, w_dl_bler, w_ul_bler, w_pusch_snr, w_pucch_snr; /* sums */
   uint32_t w_n_mac;
 
   uint32_t w_n_kpm;
   double w_kpm_dl_thp, w_kpm_ul_thp; /* kbps, last report in window */
   double w_kpm_prb_dl, w_kpm_prb_ul; /* % of cell PRBs, last report in window */
+  double w_kpm_rlc_delay_dl_us;      /* DRB.RlcSduDelayDl: mean DL wait in the RLC buffer, us */
 } ue_t;
 
 /* Call once before any E2 subscription: number of DUs and their nb_id (for log lines). */

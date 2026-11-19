@@ -3,26 +3,15 @@
 
 #include <stdio.h>
 
+#include "collect/kpm_values.h"
 #include "state/ue_table.h"
 #include "util/byte_array.h"
 #include "util/time_now_us.h"
 
-static bool record_value(meas_record_lst_t const* rec, double* v)
-{
-  if (rec->value == REAL_MEAS_VALUE) {
-    *v = rec->real_val;
-    return true;
-  }
-  if (rec->value == INTEGER_MEAS_VALUE) {
-    *v = rec->int_val;
-    return true;
-  }
-  return false;
-}
-
 /* Store one named value in the window (last report wins) */
-static void store(ue_t* u, byte_array_t name, double v)
+static void store(void* ctx, byte_array_t name, double v)
 {
+  ue_t* u = ctx;
   if (cmp_str_ba("DRB.UEThpDl", name) == 0)
     u->w_kpm_dl_thp = v;
   else if (cmp_str_ba("DRB.UEThpUl", name) == 0)
@@ -31,25 +20,8 @@ static void store(ue_t* u, byte_array_t name, double v)
     u->w_kpm_prb_dl = v;
   else if (cmp_str_ba("RRU.PrbTotUl", name) == 0)
     u->w_kpm_prb_ul = v;
-}
-
-/* All measurements of one UE's report */
-static void store_measurements(ue_t* u, kpm_ind_msg_format_1_t const* f1)
-{
-  for (size_t j = 0; j < f1->meas_data_lst_len; j++) {
-    meas_data_lst_t const* data = &f1->meas_data_lst[j];
-    size_t k = 0; /* record index runs over (measurement, label) pairs */
-    for (size_t m = 0; m < f1->meas_info_lst_len; m++) {
-      meas_info_format_1_lst_t const* info = &f1->meas_info_lst[m];
-      for (size_t z = 0; z < info->label_info_lst_len; z++, k++) {
-        if (k >= data->meas_record_len || info->meas_type.type != NAME_MEAS_TYPE)
-          continue;
-        double v;
-        if (record_value(&data->meas_record_lst[k], &v))
-          store(u, info->meas_type.name, v);
-      }
-    }
-  }
+  else if (cmp_str_ba("DRB.RlcSduDelayDl", name) == 0)
+    u->w_kpm_rlc_delay_dl_us = v;
 }
 
 void collect_kpm_du(size_t di, sm_ag_if_rd_t const* rd)
@@ -82,7 +54,7 @@ void collect_kpm_du(size_t di, sm_ag_if_rd_t const* rd)
     u->has_cu_ue_id = true;
     u->cu_ue_id = id->gnb_du.gnb_cu_ue_f1ap;
 
-    store_measurements(u, &rep->ind_msg_format_1);
+    kpm_values_for_each(&rep->ind_msg_format_1, store, u);
     u->w_n_kpm++;
   }
   ue_table_unlock();

@@ -2,10 +2,12 @@
 #include "e2/kpm_sub.h"
 
 #include <assert.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "config.h"
+#include "e2/ran_func.h"
 
 /* Matching condition: S-NSSAI equal to the lab slice (1 byte SST + 3 bytes SD) */
 static test_info_lst_t snssai_filter(void)
@@ -78,4 +80,38 @@ kpm_sub_data_t kpm_sub_style_4(ric_report_style_item_t const* item)
 
   fill_meas_list(&ad->frm_4.action_def_format_1, item);
   return sub;
+}
+
+/* Prints the subscribed measurement names, so the log shows what the node offers */
+static void print_meas(const char* label, ric_report_style_item_t const* item)
+{
+  for (size_t i = 0; i < item->meas_info_for_action_lst_len; i++) {
+    byte_array_t const name = item->meas_info_for_action_lst[i].name;
+    printf("[e2e_ctrl] %s KPM measurement: %.*s\n", label, (int)name.len, (char const*)name.buf);
+  }
+}
+
+sm_ans_xapp_t kpm_subscribe_style_4(e2_node_connected_xapp_t* n, sm_cb cb, const char* label)
+{
+  sm_ans_xapp_t h = {0};
+  size_t const k = ran_func_index(n, RF_KPM);
+  if (k == n->len_rf || n->rf[k].defn.type != KPM_RAN_FUNC_DEF_E) {
+    printf("[e2e_ctrl] %s: no KPM RAN function\n", label);
+    return h;
+  }
+  kpm_ran_function_def_t const* def = &n->rf[k].defn.kpm;
+  for (size_t j = 0; j < def->sz_ric_report_style_list; j++) {
+    ric_report_style_item_t const* item = &def->ric_report_style_list[j];
+    if (item->report_style_type != STYLE_4_RIC_SERVICE_REPORT || item->act_def_format_type != FORMAT_4_ACTION_DEFINITION)
+      continue;
+    kpm_sub_data_t sub = kpm_sub_style_4(item);
+    h = report_sm_xapp_api(&n->id, RF_KPM, &sub, cb);
+    free_kpm_sub_data(&sub);
+    printf("[e2e_ctrl] %s: KPM style 4 %s every %u ms (%zu measurements)\n", label, h.success ? "subscribed" : "FAILED",
+           KPM_PERIOD_MS, item->meas_info_for_action_lst_len);
+    print_meas(label, item);
+    return h;
+  }
+  printf("[e2e_ctrl] %s: KPM has no REPORT style 4\n", label);
+  return h;
 }
