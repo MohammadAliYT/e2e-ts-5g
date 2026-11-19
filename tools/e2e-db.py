@@ -42,9 +42,9 @@ want = [
     "ul_sched_rb",
 ]
 ts = next((c for c in cols if "tstamp" in c.lower()), None)
-node = "nb_id" if "nb_id" in cols else None  # DU1 = 3584, DU2 = 3585; cu_du_id is the same for both
+node = (
     "nb_id" if "nb_id" in cols else None
-)  # DU1 = 3584 (0xe00), DU2 = 3585 (0xe01); cu_du_id is the same for both
+)  # DU1 = 3584, DU2 = 3585; cu_du_id is the same for both
 show = [c for c in want if c in cols]
 if ts is None or "rnti" not in cols or not show:
     sys.exit(
