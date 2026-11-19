@@ -1,0 +1,13 @@
+diff --git a/examples/xApp/c/CMakeLists.txt b/examples/xApp/c/CMakeLists.txt
+index f5abd7c6..ef401dfb 100644
+--- a/examples/xApp/c/CMakeLists.txt
++++ b/examples/xApp/c/CMakeLists.txt
+@@ -11,3 +11,8 @@ add_subdirectory(kpm_rc)
+ add_subdirectory(orange)
+ add_subdirectory(rc_handover)
+ 
++
++# e2e-ts-5g: Controller v0 xApp (symlink to Controller/xapp/e2e_ctrl in the e2e-ts-5g repo)
++if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/e2e_ctrl/CMakeLists.txt)
++  add_subdirectory(e2e_ctrl)
++endif()
