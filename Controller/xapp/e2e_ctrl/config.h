@@ -32,6 +32,12 @@ enum { RF_PDCP = 144, RF_GTP = 148 };
  * OAI reports rb_id 1..5. */
 enum { DL_DRB = 1, UL_DRB = 2, MAX_RB = 6 };
 
+/* Start-up guard: wait until the RIC lists this many DUs (from $E2E_DUS, else DUS_DEFAULT) and a CU,
+ * at most NODES_WAIT_S seconds; else stop. The node list is read only once, so a controller started
+ * before every E2 setup would run without the missing nodes (20 Nov 20:09: no DU2). */
+#define DUS_ENV "E2E_DUS"
+enum { DUS_DEFAULT = 2, NODES_WAIT_S = 30 };
+
 /* Table sizes */
 enum { MAX_DU = 4, MAX_UE = 32 };
 

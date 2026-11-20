@@ -16,8 +16,10 @@
  *   output/   CSV files
  *   config.h  all fixed settings
  *
- * Run inside netns e2e-ran; stops on Ctrl+C / SIGTERM or after XAPP_DURATION seconds.
+ * Run inside netns e2e-ran, only after "lab up": it waits at most NODES_WAIT_S for $E2E_DUS DUs (default 2)
+ * and the CU, else it stops. Stops on ONE Ctrl+C / SIGTERM or after XAPP_DURATION seconds.
  */
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -42,8 +44,21 @@ int main(int argc, char* argv[])
   init_xapp_api(&args);
   sleep(1);
 
-  /* 1. which CU and DUs are there */
-  e2_node_arr_xapp_t nodes = e2_nodes_xapp_api();
+  /* 1. which CU and DUs are there (start-up guard: wait for all of them, config.h) */
+  const char* dus_env = getenv(DUS_ENV);
+  size_t const want_du = (dus_env != NULL && atoi(dus_env) > 0) ? (size_t)atoi(dus_env) : DUS_DEFAULT;
+  bool all_nodes = false;
+  e2_node_arr_xapp_t nodes = nodes_wait(want_du, NODES_WAIT_S, &all_nodes);
+  if (!all_nodes) {
+    fprintf(stderr, "[e2e_ctrl] STOP: not all E2 nodes are at the RIC. Start the controller after \"lab up\" "
+                    "(or set %s to the number of DUs).\n", DUS_ENV);
+    free_e2_node_arr_xapp(&nodes);
+    while (try_stop_xapp_api() == false)
+      usleep(1000);
+    state_csv_close();
+    csv_close();
+    return EXIT_FAILURE;
+  }
   ran_nodes_t ran;
   nodes_find(&nodes, &ran);
   if (ran.n_du == 0)

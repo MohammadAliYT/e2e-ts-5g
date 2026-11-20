@@ -4,6 +4,7 @@
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 
 #include "e2/f1_setup.h"
 
@@ -54,6 +55,38 @@ static void add_node(ran_nodes_t* ran, e2_node_connected_xapp_t* n)
     ran->cu = (cu_info_t){.node = n, .nb_id = nb_id};
   } else {
     printf("[e2e_ctrl]   neither gNB-CU nor gNB-DU, ignored\n");
+  }
+}
+
+static void count_nodes(e2_node_arr_xapp_t const* nodes, size_t* n_du, size_t* n_cu)
+{
+  *n_du = *n_cu = 0;
+  for (size_t i = 0; i < nodes->len; i++) {
+    if (nodes->n[i].id.type == ngran_gNB_DU)
+      (*n_du)++;
+    else if (nodes->n[i].id.type == ngran_gNB_CU)
+      (*n_cu)++;
+  }
+}
+
+e2_node_arr_xapp_t nodes_wait(size_t want_du, int timeout_s, bool* ok)
+{
+  for (int t = 0;; t++) {
+    e2_node_arr_xapp_t nodes = e2_nodes_xapp_api();
+    size_t n_du, n_cu;
+    count_nodes(&nodes, &n_du, &n_cu);
+    *ok = n_du >= want_du && n_cu >= 1;
+    if (*ok || t >= timeout_s) {
+      if (!*ok)
+        fprintf(stderr, "[e2e_ctrl] after %d s the RIC lists %zu DU(s) and %zu CU(s), expected %zu DU(s) and 1 CU\n",
+                t, n_du, n_cu, want_du);
+      return nodes;
+    }
+    if (t == 0)
+      printf("[e2e_ctrl] waiting for %zu DU(s) and 1 CU at the RIC (now %zu DU(s), %zu CU(s)), at most %d s\n", want_du, n_du,
+             n_cu, timeout_s);
+    free_e2_node_arr_xapp(&nodes);
+    sleep(1);
   }
 }
 

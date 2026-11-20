@@ -37,6 +37,10 @@ typedef struct {
   cu_info_t cu;
 } ran_nodes_t;
 
+/* Start-up guard: reads the node list every second until it has want_du DUs and a CU, at most
+ * timeout_s seconds. Returns the last list (free it with free_e2_node_arr_xapp()); *ok = false on timeout. */
+e2_node_arr_xapp_t nodes_wait(size_t want_du, int timeout_s, bool* ok);
+
 /* Fills ran from the node list and prints one line per node. */
 void nodes_find(e2_node_arr_xapp_t* nodes, ran_nodes_t* ran);
 

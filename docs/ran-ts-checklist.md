@@ -1,6 +1,6 @@
 # RAN TS milestone – checklist
 
-Updated: 2026-11-20 17:45. Single source of truth for all Claude sessions: read this first, update it after each step. Spell out every abbreviation in brackets.
+Updated: 2026-11-20 20:35. Single source of truth for all Claude sessions: read this first, update it after each step. Spell out every abbreviation in brackets.
 
 ## Done
 - [x] RFsim relay hub (3c): 1 radio per UE (user equipment), 2 DUs (distributed units) × 2 UEs
@@ -34,6 +34,12 @@ Updated: 2026-11-20 17:45. Single source of truth for all Claude sessions: read 
   0/3/6/10 dB at UE PHY (physical layer) and at the CU (central unit) `nrRRC_stats.log` (CU −41 / −41…−51 dBm);
   60 dB → LOST 1, then serving only (LOST after 2–5 s); 25 dB detected (earlier run). Handover regression
   `HO_TOOL=tools/ho-ctrl.sh tools/hub-ho-test.sh --no-start` 4/4 PASS (HO 1.8–2.0 s, 0 % loss, no re-establishment)
+- [x] **Controller phase 1b PASS: serving + neighbour RSRP per UE** (20 Nov 20:25; details `handover-2026-11-20.md` §10):
+  CU patch `oai-cu-rc-msg-copy-ueid.patch` (UE ID in RC REPORT style 1 copy), 5th UE patch `oai-ue-meas-reset-reest.patch`
+  (re-establishment = handover measurement actions, TS 38.331 5.5.6.1), controller `e2/rc_meas_sub.c`, `collect/rc_meas.c`,
+  `collect/meas_report_dec.c`, `state/cu_meas.c` (≤ 4 neighbours, absent = empty), start-up guard (2 DUs + CU).
+  Gap 10/6/3/0 dB at UE PHY = CU = controller (controller = CU − 1 dB, lower bin edge), both UEs; 8 re-establishments
+  per UE → 82-bit reports only; HO regression 4/4 with style 1 subscribed, every copy with UE ID
 - [x] Controller language decided: **C**. FlexRIC Python bindings (SWIG) are not built here (`XAPP_PYTHON_SWIG` absent in CMakeCache, `build/examples/xApp/python3/` has no SDK); RC handover + F1 decoding exist only in C. Python only for result analysis.
 
 ## Now
@@ -54,7 +60,8 @@ Updated: 2026-11-20 17:45. Single source of truth for all Claude sessions: read 
   - Don't run `xapp_kpm_moni` together with e2e_ctrl: OAI DU keeps KPM previous values in static arrays shared by all subscribers (`ran_func_kpm_subs.c:198-199`)
 
 ## Next
-- [ ] Controller v0 stages 2–5 (state, act on command, decide, experiment hooks)
+- [ ] Controller v0 stage 4 (decide) and 5 (experiment hooks); stages 1b, 2, 3 done (`handover-2026-11-20.md` §8, §10).
+  Phase 4 rule: use a measurement only if `srv_pci` = PCI of the serving DU and `srv_age_ms` is small (1–2 s stale after a HO)
 - [ ] Cell capacity per DU (max DL / UL) as reference for the load scenario
 - [ ] Scenario 1: load / capacity (vs B0)
 - [ ] Scenario 2: QoS (quality of service) / service
@@ -75,6 +82,9 @@ Updated: 2026-11-20 17:45. Single source of truth for all Claude sessions: read 
 | AMF rejects re-registration after complete link loss | Medium | Hits B0 if a UE fully loses the link; tests stay < 25 dB |
 | No CQI (Channel Quality Indicator) | Low | MCS + BLER + E2 PUSCH SNR instead |
 | `ho.sh` 6 s run time | Low | persistent controller avoids it |
+| FlexRIC RIC stuck after an xApp dies with active subscriptions (`ric.out`: `SCTP_SEND_FAILED`, `xApp <n> disconnected!`); next controller aborts "Timeout waiting for Report" | Medium | Full lab restart. Start `e2e_ctrl` only after `lab up`, one at a time, stop with ONE Ctrl+C |
+| UE PHY needs a few s to add the neighbour again after a cell change (53-bit reports = absent meanwhile); PHY neighbour state not reset on a cell change (probable, unverified) | Low | Short gaps in neighbour data after each HO |
+| Controller abort at shutdown once (`assoc_rb_tree_extract`), after two Ctrl+C | Low | Data complete (CSV closed first); not seen with one Ctrl+C |
 
 ## Observations for the thesis
 - Per PDU session there are 2 DRBs (data radio bearers): **DL data on DRB 1, UL data on DRB 2** (RLC counters, 19 Nov 15:08). Relevant for the QoS scenario; cause (free5GC QoS flow rules) still to confirm.
