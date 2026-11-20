@@ -1,0 +1,480 @@
+--- a/openair1/PHY/defs_nr_UE.h
++++ b/openair1/PHY/defs_nr_UE.h
+@@ -98,6 +98,8 @@
+   bool valid_meas;
+   /// slot of the frame cycle (frame * slots_per_frame + slot) of the last measurement, -1 if none
+   int last_meas_slot;
++  /// e2e-ts patch: consecutive checks that passed the add threshold while the cell is not yet valid
++  int add_passes;
+ } neighboring_cell_info_t;
+ 
+ typedef struct {
+--- a/openair1/PHY/NR_UE_ESTIMATION/nr_ue_measurements.c
++++ b/openair1/PHY/NR_UE_ESTIMATION/nr_ue_measurements.c
+@@ -293,6 +293,7 @@
+   neighboring_cell_info->valid_meas = false;
+   neighboring_cell_info->consec_fail = 0;
+   neighboring_cell_info->last_meas_slot = -1;
++  neighboring_cell_info->add_passes = 0; // e2e-ts patch
+   neighbor_cell->is_candidate = false;
+   if (!neighbor_cell->Nid_cell_was_configured)
+     neighbor_cell->Nid_cell = -1;
+@@ -463,15 +464,336 @@
+   return cell_detected;
+ }
+ 
++/* e2e-ts patch (oai-ue-neigh-known-pci.patch): measure a KNOWN neighbour PCI at the serving SSB timing first.
++ * In a synchronous TDD network, a neighbour with the same SSB position sends its SSB at the same time as the
++ * serving cell (hub lab: both DUs take frame and slot from the same sample time, nr-ru.c rx_rf()). Then the
++ * neighbour SSB lies on top of the stronger serving SSB. A PSS search then finds the serving cell or a side
++ * lobe, and the SSS check passes at wrong timings that overlap part of the SSB (lab, 20 Nov 2026).
++ * The per-cell RSRP (nr_ue_calculate_ssb_rsrp_cell()) separates the cells at the same timing.
++ * Detection test (CFAR, constant false-alarm rate):
++ *   1. Remove the serving cell's SSS from a copy of the SSS symbol (interference cancellation).
++ *      Without this step, the product of the serving SSS and the neighbour SSS gives every other PCI a
++ *      leftover that grows with the square root of the neighbour power (lab, 20 Nov 2026: max dummy rho 0.055
++ *      at 10 dB, 0.11 at 0 dB, 0.014 with the neighbour absent), and the test fails from ~6 dB.
++ *   2. rho(pci) = cell RSRP of pci on that copy / mean power of all SSS REs before step 1.
++ *   3. ratio = rho(known PCI) / max rho(dummy). The dummies are NR_KNOWN_PCI_CFAR_DUMMIES unused PCIs with
++ *      the same N_ID2, at the same timing. A fixed floor does not work: a neighbour 10 dB below the serving
++ *      cell gives rho ~0.09 (20 dB: ~0.01), but the leftover of an absent PCI depends on the PCI pair.
++ *   4. Hysteresis: a new cell needs ratio > NR_KNOWN_PCI_ADD_FACTOR on NR_KNOWN_PCI_ADD_CHECKS checks in a row;
++ *      a valid cell stays while ratio > NR_KNOWN_PCI_KEEP_FACTOR. A valid cell is LOST after
++ *      NEIGHBOR_CELL_MAX_CONSECUTIVE_FAILURES failed checks in a row (the UE then sends INT_MAX to RRC).
++ *   Offline model (static channel, serving SNR 35 dB, 6 dummies): 0 false adds in 600000 checks with the PCI
++ *   absent; ratio ~22 at 10 dB and ~13 at 25 dB below the serving cell; worst of 100 PCI pairs 6.9 at 25 dB.
++ * If the check at the serving timing fails (other SSB position, cells not synchronous, FDD), the PSS/SSS search
++ * of validate_known_pci() runs as before. Its result must pass the same CFAR test. */
++#define NR_KNOWN_PCI_CFAR_DUMMIES 6
++#define NR_KNOWN_PCI_ADD_FACTOR 3.0
++#define NR_KNOWN_PCI_ADD_CHECKS 2
++#define NR_KNOWN_PCI_KEEP_FACTOR 2.0
++#define NR_SERVING_CANCEL_HALF_WIN 7 /* channel estimate of the serving cell: mean over 2 x 7 + 1 subcarriers */
++
++typedef struct {
++  int nb;
++  uint16_t pci[NR_KNOWN_PCI_CFAR_DUMMIES];
++} known_pci_dummies_t;
++
++/* Result of one known-PCI check, for logs */
++typedef struct {
++  int pos; // start of the PSS (without CP) in the slot buffer; -1: no timing tested
++  double rho; // rho of the known PCI at pos
++  double rho_dummy_max; // largest rho of the dummies at pos
++  double ratio; // rho / rho_dummy_max
++} known_pci_result_t;
++
++/* Start of the serving cell's PSS (without CP) in the slot buffer of proc.
++ * Returns -1 if this slot carries no serving SSB (same periodicity rule as get_ssb_index_in_symbol()). */
++static int serving_ssb_pss_pos(const PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc)
++{
++  const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
++  const int ssb_period = ue->received_config_request ? ue->nrUE_config.ssb_table.ssb_period : 2;
++  if (ssb_period != 0 && (proc->frame_rx % (1 << (ssb_period - 1))))
++    return -1;
++
++  const int start = nr_get_ssb_start_symbol(fp, fp->ssb_index); // PSS symbol, counted from the half-frame start
++  const int ssb_slot = start / NR_SYMBOLS_PER_SLOT;
++  if (proc->nr_slot_rx != ssb_slot && !(ssb_period == 0 && proc->nr_slot_rx == ssb_slot + fp->slots_per_frame / 2))
++    return -1;
++
++  // CP rule of nr_slot_fep(): the first symbol of each half subframe has the long CP
++  const int pss_symbol = start % NR_SYMBOLS_PER_SLOT;
++  int pos = 0;
++  for (int l = 0; l <= pss_symbol; l++) {
++    const int abs_symbol = proc->nr_slot_rx * NR_SYMBOLS_PER_SLOT + l;
++    pos += (abs_symbol % (0x7 << fp->numerology_index)) ? fp->nb_prefix_samples : fp->nb_prefix_samples0;
++    if (l < pss_symbol)
++      pos += fp->ofdm_symbol_size;
++  }
++  return pos;
++}
++
++/* Unused PCIs with the same N_ID2 as known_pci: not the serving PCI, not a PCI in the neighbour list */
++static known_pci_dummies_t get_known_pci_dummies(const PHY_VARS_NR_UE *ue, uint16_t known_pci)
++{
++  known_pci_dummies_t d = {.nb = 0};
++  const fapi_nr_neighboring_cell_t *cells = ue->nrUE_config.meas_config.nr_neighboring_cell;
++  for (int pci = known_pci % NUMBER_PSS_SEQUENCE; pci <= 1007 && d.nb < NR_KNOWN_PCI_CFAR_DUMMIES; pci += NUMBER_PSS_SEQUENCE) {
++    bool used = pci == known_pci || pci == ue->frame_parms.Nid_cell;
++    for (int i = 0; i < NUMBER_OF_NEIGHBORING_CELLS_MAX && !used; i++)
++      used = cells[i].active && cells[i].Nid_cell == pci;
++    if (!used)
++      d.pci[d.nb++] = pci;
++  }
++  return d;
++}
++
++static inline int16_t sat_int16(double x)
++{
++  return x > INT16_MAX ? INT16_MAX : (x < INT16_MIN ? INT16_MIN : (int16_t)lround(x));
++}
++
++/* Copy of the SSS symbol rxF_sss without the SSS of serving_pci (interference cancellation), into out.
++ * Per antenna, on the 127 SSS subcarriers:
++ *   z[n] = rx[n] d[n] (d = SSS sequence of the serving PCI)
++ *   a = arg(sum z[n] conj(z[n-1])): phase step per subcarrier (timing ramp)
++ *   h[n] = mean of z[k] exp(-j a k) for |k - n| <= NR_SERVING_CANCEL_HALF_WIN (channel of the serving cell)
++ *   out[n] = rx[n] - h[n] exp(j a n) d[n]
++ * The mean over 15 subcarriers follows a frequency-selective channel and averages the neighbour out. */
++static void known_pci_cancel_serving(const NR_DL_FRAME_PARMS *fp,
++                                     const c16_t rxF_sss[][fp->ofdm_symbol_size],
++                                     int serving_pci,
++                                     c16_t out[][fp->ofdm_symbol_size])
++{
++  int16_t d[LENGTH_SSS_NR];
++  nr_sss_sequence(serving_pci, d);
++  const int k0 = fp->ssb_start_subcarrier + 56; // SSS: subcarriers 56..182 of the SSB
++  for (int aarx = 0; aarx < fp->nb_antennas_rx; aarx++) {
++    memcpy(out[aarx], rxF_sss[aarx], sizeof(c16_t) * fp->ofdm_symbol_size);
++    const c16_t *r = rxF_sss[aarx] + k0;
++    double ur[LENGTH_SSS_NR], ui[LENGTH_SSS_NR];
++    double cr = 0, ci = 0;
++    for (int n = 0; n < LENGTH_SSS_NR; n++) {
++      ur[n] = (double)r[n].r * d[n];
++      ui[n] = (double)r[n].i * d[n];
++      if (n > 0) { // z[n] * conj(z[n-1])
++        cr += ur[n] * ur[n - 1] + ui[n] * ui[n - 1];
++        ci += ui[n] * ur[n - 1] - ur[n] * ui[n - 1];
++      }
++    }
++    const double a = atan2(ci, cr);
++    for (int n = 0; n < LENGTH_SSS_NR; n++) { // remove the ramp: u[n] = z[n] exp(-j a n)
++      const double c = cos(a * n), s = sin(a * n);
++      const double xr = ur[n] * c + ui[n] * s, xi = ui[n] * c - ur[n] * s;
++      ur[n] = xr;
++      ui[n] = xi;
++    }
++    for (int n = 0; n < LENGTH_SSS_NR; n++) {
++      const int lo = max(0, n - NR_SERVING_CANCEL_HALF_WIN), hi = min(LENGTH_SSS_NR - 1, n + NR_SERVING_CANCEL_HALF_WIN);
++      double hr = 0, hi_ = 0;
++      for (int k = lo; k <= hi; k++) {
++        hr += ur[k];
++        hi_ += ui[k];
++      }
++      hr /= hi - lo + 1;
++      hi_ /= hi - lo + 1;
++      const double c = cos(a * n), s = sin(a * n);
++      const double er = (hr * c - hi_ * s) * d[n], ei = (hi_ * c + hr * s) * d[n]; // h[n] exp(j a n) d[n]
++      out[aarx][k0 + n].r = sat_int16(r[n].r - er);
++      out[aarx][k0 + n].i = sat_int16(r[n].i - ei);
++    }
++  }
++}
++
++/* CFAR test of known_pci on the SSS symbol rxF_sss: ratio > factor (see the comment at the top).
++ * Writes rho, rho_dummy_max and ratio to res. */
++static bool known_pci_cfar_pass(const NR_DL_FRAME_PARMS *fp,
++                                const c16_t rxF_sss[][fp->ofdm_symbol_size],
++                                uint16_t known_pci,
++                                const known_pci_dummies_t *dummies,
++                                double factor,
++                                known_pci_result_t *res)
++{
++  __attribute__((aligned(32))) c16_t clean[fp->nb_antennas_rx][fp->ofdm_symbol_size];
++  known_pci_cancel_serving(fp, rxF_sss, fp->Nid_cell, clean);
++  const uint32_t all = nr_ue_calculate_ssb_rsrp(fp, rxF_sss, fp->ssb_start_subcarrier);
++  const double norm = all > 0 ? all : 1;
++  res->rho = nr_ue_calculate_ssb_rsrp_cell(fp, clean, fp->ssb_start_subcarrier, known_pci) / norm;
++  res->rho_dummy_max = 0;
++  for (int i = 0; i < dummies->nb; i++) {
++    const double rho = nr_ue_calculate_ssb_rsrp_cell(fp, clean, fp->ssb_start_subcarrier, dummies->pci[i]) / norm;
++    if (rho > res->rho_dummy_max)
++      res->rho_dummy_max = rho;
++  }
++  res->ratio = res->rho_dummy_max > 0 ? res->rho / res->rho_dummy_max : 0;
++  return dummies->nb > 0 && res->ratio > factor;
++}
++
++/* FFT of the PSS and SSS symbols of the SSB whose PSS (without CP) starts at sample pss_pos, into rxdataF */
++static void known_pci_ssb_fft(const NR_DL_FRAME_PARMS *frame_parms,
++                              c16_t **rxdata,
++                              int pss_pos,
++                              c16_t rxdataF[][frame_parms->nb_antennas_rx][frame_parms->ofdm_symbol_size])
++{
++  __attribute__((aligned(32))) c16_t rxdataF_tmp[frame_parms->nb_antennas_rx][frame_parms->samples_per_slot_wCP];
++  const uint8_t sss_symbol = SSS_SYMBOL_NB - PSS_SYMBOL_NB;
++  const int ssb_time_offset = pss_pos - frame_parms->nb_prefix_samples;
++  nr_slot_fep(NULL, frame_parms, 0, 0, 0, rxdataF_tmp, link_type_dl, ssb_time_offset, rxdata);
++  nr_slot_fep(NULL, frame_parms, 0, 0, sss_symbol, rxdataF_tmp, link_type_dl, ssb_time_offset, rxdata);
++  /* TODO: Once symbol based PDSCH proc is implemented, nr_slot_fep() will use
++  the new rxdataF buffer format so the following memcpy can be removed. */
++  for (int aarx = 0; aarx < frame_parms->nb_antennas_rx; aarx++) {
++    memcpy(rxdataF[0][aarx], &rxdataF_tmp[aarx][0], sizeof(c16_t) * frame_parms->ofdm_symbol_size);
++    memcpy(rxdataF[sss_symbol][aarx],
++           &rxdataF_tmp[aarx][sss_symbol * frame_parms->ofdm_symbol_size],
++           sizeof(c16_t) * frame_parms->ofdm_symbol_size);
++  }
++}
++
++/* State update after a successful check: the PSS of the cell starts at pss_pos in this slot */
++static void known_pci_found(const NR_DL_FRAME_PARMS *frame_parms,
++                            fapi_nr_neighboring_cell_t *nr_neighboring_cell,
++                            neighboring_cell_info_t *neighboring_cell_info,
++                            int pss_pos,
++                            int slot)
++{
++  nr_neighboring_cell->is_candidate = false;
++  neighboring_cell_info->consec_fail = 0;
++  neighboring_cell_info->valid_meas = true;
++  neighboring_cell_info->add_passes = 0;
++  update_pss_search_window(neighboring_cell_info, pss_pos, frame_parms->samples_per_slot_wCP, frame_parms->ofdm_symbol_size);
++  neighboring_cell_info->ssb_slot = slot;
++}
++
++/* Check known_pci at the serving SSB timing pss_pos (-1: this slot has no serving SSB), threshold factor.
++ * On success, rxdataF holds the SSB at pss_pos. Does not change the state of the cell. */
++static bool check_known_pci_at_serving_timing(const NR_DL_FRAME_PARMS *frame_parms,
++                                              uint16_t known_pci,
++                                              int pss_pos,
++                                              const known_pci_dummies_t *dummies,
++                                              double factor,
++                                              c16_t **rxdata,
++                                              c16_t rxdataF[][frame_parms->nb_antennas_rx][frame_parms->ofdm_symbol_size],
++                                              known_pci_result_t *res)
++{
++  *res = (known_pci_result_t){.pos = pss_pos};
++  if (pss_pos < frame_parms->nb_prefix_samples)
++    return false;
++  known_pci_ssb_fft(frame_parms, rxdata, pss_pos, rxdataF);
++  const uint8_t sss_symbol = SSS_SYMBOL_NB - PSS_SYMBOL_NB;
++  return known_pci_cfar_pass(frame_parms, rxdataF[sss_symbol], known_pci, dummies, factor, res);
++}
++
++/* CFAR threshold for the next check: keep a valid cell, or add a new cell */
++static double known_pci_threshold(const neighboring_cell_info_t *neighboring_cell_info)
++{
++  return neighboring_cell_info->valid_meas ? NR_KNOWN_PCI_KEEP_FACTOR : NR_KNOWN_PCI_ADD_FACTOR;
++}
++
++/* Hysteresis (see the comment at the top). Returns true if the cell counts as detected in this check.
++ * passed: the CFAR test passed with the threshold of known_pci_threshold(); tested: a CFAR test ran. */
++static bool known_pci_hysteresis(neighboring_cell_info_t *neighboring_cell_info, bool passed, bool tested)
++{
++  if (neighboring_cell_info->valid_meas)
++    return passed;
++  if (passed)
++    return ++neighboring_cell_info->add_passes >= NR_KNOWN_PCI_ADD_CHECKS;
++  if (tested) // a check without any tested timing (no SSB found in this slot) does not break the series
++    neighboring_cell_info->add_passes = 0;
++  return false;
++}
++
++/* One check of a known PCI: threshold and the results of both paths */
++typedef struct {
++  double factor; // CFAR threshold of this check (known_pci_threshold())
++  known_pci_result_t at_serving; // check at the serving SSB timing
++  known_pci_result_t by_search; // fallback PSS/SSS search; pos -1: not run or no timing found
++} known_pci_check_t;
++
++/* Result of the path that decided the check: the search if it tested a timing, else the serving timing */
++static const known_pci_result_t *known_pci_chosen(const known_pci_check_t *check)
++{
++  return check->by_search.pos >= 0 ? &check->by_search : &check->at_serving;
++}
++
++/* Diagnostic lines for tools/neigh-meas-test.sh. Off by default.
++ * Switch: environment variable E2E_NEIGH_DIAG=1 when the UE starts (read once). */
++typedef enum {
++  KNOWN_PCI_DIAG_ADDED,
++  KNOWN_PCI_DIAG_CONFIRMED, // every 5th line (about 1 per second for a valid cell)
++  KNOWN_PCI_DIAG_NOT_DETECTED, // every 5th line
++  KNOWN_PCI_DIAG_LOST,
++} known_pci_diag_event_t;
++
++static bool known_pci_diag_on(void)
++{
++  static int on = -1; // -1: not read yet
++  if (on < 0) {
++    const char *v = getenv("E2E_NEIGH_DIAG");
++    on = v != NULL && strcmp(v, "1") == 0;
++    LOG_I(NR_PHY, "[e2e-ts diag] neighbour diag lines %s (E2E_NEIGH_DIAG=%s)\n", on ? "on" : "off", v ? v : "unset");
++  }
++  return on;
++}
++
++/* rxF_sss: SSS symbol of the measured SSB (CONFIRMED only, else NULL) */
++static void known_pci_diag(known_pci_diag_event_t event,
++                           const NR_DL_FRAME_PARMS *fp,
++                           uint16_t pci,
++                           const known_pci_check_t *check,
++                           const neighboring_cell_info_t *info,
++                           const c16_t (*rxF_sss)[fp->ofdm_symbol_size])
++{
++  if (!known_pci_diag_on())
++    return;
++  static uint32_t n_ok, n_fail;
++  const known_pci_result_t *r = known_pci_chosen(check);
++  const char *path = check->by_search.pos >= 0 ? "search" : "serving-timing";
++  const char *thr = check->factor == NR_KNOWN_PCI_KEEP_FACTOR ? "keep" : "add";
++  switch (event) {
++    case KNOWN_PCI_DIAG_ADDED:
++      LOG_I(NR_PHY, "[e2e-ts diag] neighbour PCI %d ADDED: %s check pos %d ratio %.2f thr %s\n", pci, path, r->pos, r->ratio, thr);
++      break;
++    case KNOWN_PCI_DIAG_LOST:
++      LOG_I(NR_PHY,
++            "[e2e-ts diag] neighbour PCI %d LOST after %d failed checks, sent INT_MAX\n",
++            pci,
++            NEIGHBOR_CELL_MAX_CONSECUTIVE_FAILURES);
++      break;
++    case KNOWN_PCI_DIAG_NOT_DETECTED:
++      if (n_fail++ % 5 == 0)
++        LOG_I(NR_PHY,
++              "[e2e-ts diag] neighbour PCI %d not detected (%u so far): check pos %d ratio %.2f thr %s, add passes %d, consec %d | "
++              "serving pos %d rho %.4f ratio %.2f, search pos %d rho %.4f ratio %.2f\n",
++              pci, n_fail, r->pos, r->ratio, thr, info->add_passes, info->consec_fail, check->at_serving.pos, check->at_serving.rho,
++              check->at_serving.ratio, check->by_search.pos, check->by_search.rho, check->by_search.ratio);
++      break;
++    case KNOWN_PCI_DIAG_CONFIRMED:
++      if (n_ok++ % 5 == 0) {
++        const uint32_t all = nr_ue_calculate_ssb_rsrp(fp, rxF_sss, fp->ssb_start_subcarrier);
++        LOG_I(NR_PHY,
++              "[e2e-ts diag] neighbour PCI %d confirmed (%u so far): %s check pos %d ratio %.2f thr %s, rho %.4f, RSRP cell %.1f "
++              "dB/RE, all SSS %.1f dB/RE, sent %d dBm\n",
++              pci, n_ok, path, r->pos, r->ratio, thr, r->rho, 10 * log10(info->ssb_rsrp), 10 * log10(all > 0 ? all : 1),
++              info->ssb_rsrp_dBm);
++      }
++      break;
++  }
++}
++
++/* Fallback: PSS search in the tracking window, then SSS check of the known PCI (PR #919), then the CFAR test
++ * with threshold factor (e2e-ts patch). On success, rxdataF holds the SSB that was found and cfar_res->pos is
++ * its timing; the caller updates the state of the cell. A failure of a valid cell counts in consec_fail. */
+ static bool validate_known_pci(NR_DL_FRAME_PARMS *frame_parms,
+                                uint16_t known_pci,
+-                               fapi_nr_neighboring_cell_t *nr_neighboring_cell,
+                                neighboring_cell_info_t *neighboring_cell_info,
+                                c16_t **rxdata,
+                                c16_t rxdataF[][frame_parms->nb_antennas_rx][frame_parms->ofdm_symbol_size],
+                                c16_t pssTime[][frame_parms->ofdm_symbol_size],
+-                               int slot)
++                               int slot,
++                               const known_pci_dummies_t *dummies,
++                               double factor,
++                               known_pci_result_t *cfar_res)
+ {
++  *cfar_res = (known_pci_result_t){.pos = -1};
+ 
+   int length = neighboring_cell_info->pss_search_length;
+   c16_t *rx[frame_parms->nb_antennas_rx];
+@@ -512,18 +834,8 @@
+     return false; // pss position is too close to buffer beginning
+   }
+ 
+-  __attribute__((aligned(32))) c16_t rxdataF_tmp[frame_parms->nb_antennas_rx][frame_parms->samples_per_slot_wCP];
+-  uint8_t sss_symbol = SSS_SYMBOL_NB - PSS_SYMBOL_NB;
+-  nr_slot_fep(NULL, frame_parms, 0, 0, 0, rxdataF_tmp, link_type_dl, ssb_time_offset, (c16_t **)rxdata);
+-  nr_slot_fep(NULL, frame_parms, 0, 0, sss_symbol, rxdataF_tmp, link_type_dl, ssb_time_offset, (c16_t **)rxdata);
+-  /* TODO: Once symbol based PDSCH proc is implemented, nr_slot_fep() will use
+-  the new rxdataF buffer format so the following memcpy can be removed. */
+-  for (int aarx = 0; aarx < frame_parms->nb_antennas_rx; aarx++) {
+-    memcpy(rxdataF[0][aarx], &rxdataF_tmp[aarx][0], sizeof(c16_t) * frame_parms->ofdm_symbol_size);
+-    memcpy(rxdataF[sss_symbol][aarx],
+-           &rxdataF_tmp[aarx][sss_symbol * frame_parms->ofdm_symbol_size],
+-           sizeof(c16_t) * frame_parms->ofdm_symbol_size);
+-  }
++  const int pss_abs_pos = neighboring_cell_info->pss_search_start + pss_res.pos;
++  known_pci_ssb_fft(frame_parms, rxdata, pss_abs_pos, rxdataF);
+ 
+   nr_sss_params_t p_sss = (nr_sss_params_t){.nb_antennas_rx = frame_parms->nb_antennas_rx,
+                                             .samples_per_slot_wCP = frame_parms->samples_per_slot_wCP,
+@@ -541,14 +853,17 @@
+     return false;
+   }
+ 
+-  LOG_D(NR_PHY, "Known PCI validation completed for PCI=%d\n", known_pci);
+-  nr_neighboring_cell->is_candidate = false;
+-  neighboring_cell_info->consec_fail = 0;
+-  neighboring_cell_info->valid_meas = true;
+-  int pss_abs_pos = neighboring_cell_info->pss_search_start + pss_res.pos;
+-  update_pss_search_window(neighboring_cell_info, pss_abs_pos, frame_parms->samples_per_slot_wCP, frame_parms->ofdm_symbol_size);
+-  neighboring_cell_info->ssb_slot = slot;
++  // e2e-ts patch: the SSS check also passes at timings that overlap part of another cell's SSB
++  const uint8_t sss_symbol = SSS_SYMBOL_NB - PSS_SYMBOL_NB;
++  cfar_res->pos = pss_abs_pos;
++  if (!known_pci_cfar_pass(frame_parms, rxdataF[sss_symbol], known_pci, dummies, factor, cfar_res)) {
++    if (neighboring_cell_info->valid_meas)
++      neighboring_cell_info->consec_fail++;
++    LOG_D(NR_PHY, "Known PCI CFAR test failed for PCI=%d, consec_fail=%d\n", known_pci, neighboring_cell_info->consec_fail);
++    return false;
++  }
+ 
++  LOG_D(NR_PHY, "Known PCI validation completed for PCI=%d\n", known_pci);
+   return true;
+ }
+ 
+@@ -696,15 +1011,52 @@
+     }
+ 
+     // PR 1142: the slot check is in is_neighboring_cell_due()
+-    if (!validate_known_pci(frame_parms, nid_cell, neighbor_cell, neighboring_cell_info, rxdata, rxdataF, pssTime, proc->nr_slot_rx)) {
+-      if (neighboring_cell_info->ssb_slot == -1)
+-        neighboring_cell_info->last_meas_slot = now;
+-
++    // e2e-ts patch: check at the serving SSB timing first; the PSS/SSS search is the fallback
++    const known_pci_dummies_t dummies = get_known_pci_dummies(ue, nid_cell);
++    known_pci_check_t check = {.factor = known_pci_threshold(neighboring_cell_info),
++                               .at_serving = {.pos = -1},
++                               .by_search = {.pos = -1}};
++    const int serving_pos = serving_ssb_pss_pos(ue, proc);
++    bool passed =
++        check_known_pci_at_serving_timing(frame_parms, nid_cell, serving_pos, &dummies, check.factor, rxdata, rxdataF, &check.at_serving);
++    if (!passed)
++      passed = validate_known_pci(frame_parms,
++                                  nid_cell,
++                                  neighboring_cell_info,
++                                  rxdata,
++                                  rxdataF,
++                                  pssTime,
++                                  proc->nr_slot_rx,
++                                  &dummies,
++                                  check.factor,
++                                  &check.by_search);
++    const known_pci_result_t *chosen = known_pci_chosen(&check);
++    const bool was_valid = neighboring_cell_info->valid_meas;
++    const bool found = known_pci_hysteresis(neighboring_cell_info, passed, chosen->pos >= 0);
++    if (found)
++      known_pci_found(frame_parms, neighbor_cell, neighboring_cell_info, chosen->pos, proc->nr_slot_rx);
++    if (found && !was_valid)
++      known_pci_diag(KNOWN_PCI_DIAG_ADDED, frame_parms, nid_cell, &check, neighboring_cell_info, NULL);
++    // e2e-ts patch: every check counts for the schedule; else a valid cell that fails is checked again in each
++    // ssb_slot (also in frames without SSB), and 10 failures take ~0.1 s instead of 10 measurement periods
++    neighboring_cell_info->last_meas_slot = now;
++    LOG_D(NR_PHY,
++          "Known PCI %d %s (threshold %.1f): serving SSB timing pos %d ratio %.2f, PSS/SSS search pos %d ratio %.2f\n",
++          nid_cell,
++          found ? "found" : "not found",
++          check.factor,
++          check.at_serving.pos,
++          check.at_serving.ratio,
++          check.by_search.pos,
++          check.by_search.ratio);
++    if (!found) {
++      known_pci_diag(KNOWN_PCI_DIAG_NOT_DETECTED, frame_parms, nid_cell, &check, neighboring_cell_info, NULL);
+       if (neighboring_cell_info->consec_fail >= NEIGHBOR_CELL_MAX_CONSECUTIVE_FAILURES) {
+         if (neighbor_cell->is_candidate) {
+           LOG_D(NR_PHY, "Neighbor cell confirmation failed for candidate with PCI=%d\n", nid_cell);
+         } else {
+           LOG_D(NR_PHY, "Max consecutive failures reached for PCI=%d, resetting to full search\n", nid_cell);
++          known_pci_diag(KNOWN_PCI_DIAG_LOST, frame_parms, nid_cell, &check, neighboring_cell_info, NULL);
+           send_neighbor_cell_meas(ue, proc, nid_cell, INT_MAX);
+         }
+         reset_neighboring_cell_info(neighbor_cell,
+@@ -714,8 +1066,6 @@
+       continue;
+     }
+ 
+-    neighboring_cell_info->last_meas_slot = now;
+-
+     // RSRP measurements
+     uint8_t sss_symbol = SSS_SYMBOL_NB - PSS_SYMBOL_NB;
+     // e2e-ts patch: RSRP of this neighbour only, not of all cells on the SSS REs (TS 38.215 5.1.1)
+@@ -727,6 +1077,7 @@
+         - ((int)openair0_cfg_g[ue->rf_map.card].rx_gain[0] - (int)openair0_cfg_g[ue->rf_map.card].rx_gain_offset[0])
+         - dB_fixed(ue->frame_parms.ofdm_symbol_size);
+ 
++    known_pci_diag(KNOWN_PCI_DIAG_CONFIRMED, frame_parms, nid_cell, &check, neighboring_cell_info, rxdataF[sss_symbol]);
+     // Send SS measurements to RRC directly
+     send_neighbor_cell_meas(ue, proc, nid_cell, neighboring_cell_info->ssb_rsrp_dBm);
+   }

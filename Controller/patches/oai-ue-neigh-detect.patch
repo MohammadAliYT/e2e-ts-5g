@@ -1,0 +1,461 @@
+diff --git a/openair1/PHY/INIT/nr_init_ue.c b/openair1/PHY/INIT/nr_init_ue.c
+index 03c955a087..4f5dceb45a 100644
+--- a/openair1/PHY/INIT/nr_init_ue.c
++++ b/openair1/PHY/INIT/nr_init_ue.c
+@@ -577,7 +577,10 @@ void init_phy_nr_measurements(PHY_VARS_NR_UE *ue)
+   measurements->search_new_cells_pending = false;
+   measurements->last_blind_slot = -1;
+   measurements->last_slot = -1;
+-  measurements->last_meas_slot = -1;
++  for (int i = 0; i < NUMBER_OF_NEIGHBORING_CELLS_MAX; i++) {
++    measurements->neighboring_cell_info[i].ssb_slot = -1;
++    measurements->neighboring_cell_info[i].last_meas_slot = -1;
++  }
+ }
+ 
+ void clean_UE_harq(PHY_VARS_NR_UE *UE)
+diff --git a/openair1/PHY/NR_UE_ESTIMATION/nr_estimation.h b/openair1/PHY/NR_UE_ESTIMATION/nr_estimation.h
+index 786cabeb54..44dc1a7551 100644
+--- a/openair1/PHY/NR_UE_ESTIMATION/nr_estimation.h
++++ b/openair1/PHY/NR_UE_ESTIMATION/nr_estimation.h
+@@ -102,6 +102,8 @@ typedef struct {
+   c16_t rxdata_ant[];
+ } nr_meas_task_args_t;
+ 
++uint32_t get_ssb_arfcn(const NR_DL_FRAME_PARMS *frame_parms);
++bool is_neighboring_cell_due(const PHY_VARS_NR_UE *ue, int cell_idx, const UE_nr_rxtx_proc_t *proc);
+ void nr_ue_meas_neighboring_cell(void *arg);
+ void nr_ue_search_new_neighboring_cell(void *arg);
+ 
+diff --git a/openair1/PHY/NR_UE_ESTIMATION/nr_ue_measurements.c b/openair1/PHY/NR_UE_ESTIMATION/nr_ue_measurements.c
+index a21f751517..b0371998cd 100644
+--- a/openair1/PHY/NR_UE_ESTIMATION/nr_ue_measurements.c
++++ b/openair1/PHY/NR_UE_ESTIMATION/nr_ue_measurements.c
+@@ -292,11 +292,78 @@ static void reset_neighboring_cell_info(fapi_nr_neighboring_cell_t *neighbor_cel
+   neighboring_cell_info->ssb_slot = -1;
+   neighboring_cell_info->valid_meas = false;
+   neighboring_cell_info->consec_fail = 0;
++  neighboring_cell_info->last_meas_slot = -1;
+   neighbor_cell->is_candidate = false;
+   if (!neighbor_cell->Nid_cell_was_configured)
+     neighbor_cell->Nid_cell = -1;
+ }
+ 
++#define PSS_SEARCH_HALF_WINDOW 64
++
++static inline void update_pss_search_window(neighboring_cell_info_t *cell_info,
++                                            int pss_abs_pos,
++                                            int samples_per_slot,
++                                            int ofdm_symbol_size)
++{
++  int pss_start = (pss_abs_pos > PSS_SEARCH_HALF_WINDOW) ? (pss_abs_pos - PSS_SEARCH_HALF_WINDOW) : 0;
++  int pss_end =
++      (pss_abs_pos + PSS_SEARCH_HALF_WINDOW < samples_per_slot) ? (pss_abs_pos + PSS_SEARCH_HALF_WINDOW) : samples_per_slot;
++  cell_info->pss_search_start = pss_start;
++  cell_info->pss_search_length = (pss_end - pss_start) + ofdm_symbol_size;
++}
++
++static double nr_compute_normalized_dmrs(const NR_DL_FRAME_PARMS *frame_parms,
++                                         int nid_cell,
++                                         int ssb_start_subcarrier,
++                                         const uint32_t *gold,
++                                         c16_t rxdataF[][frame_parms->nb_antennas_rx][frame_parms->ofdm_symbol_size])
++{
++  const int k = nid_cell % 4;
++  double total_corr_energy = 0;
++  double total_norm_energy = 0;
++  c16_t pilot[200] __attribute__((aligned(16)));
++
++  for (int s = 0; s < 3; s++) {
++    int symb = s + 1; // PBCH is at symbols 1, 2, 3 of SSB
++    nr_pbch_dmrs_rx(s, gold, pilot, false);
++
++    // Symbol 0: 60 pilots -> 5 blocks of 12
++    // Symbol 1: 24 pilots -> 2 blocks of 12 (12 left of SSS, 12 right of SSS)
++    // Symbol 2: 60 pilots -> 5 blocks of 12
++    int num_blocks = (s == 1) ? 2 : 5;
++
++    for (int b = 0; b < num_blocks; b++) {
++      int p_start = b * 12;
++      for (int aarx = 0; aarx < frame_parms->nb_antennas_rx; aarx++) {
++        cd_t corr = {0};
++        double p_energy = 0;
++        double rx_energy = 0;
++        for (int p = 0; p < 12; p++) {
++          int pil_idx = p_start + p;
++          int re_offset;
++          if (s == 1 && b == 1) {
++            // Second block of symbol 1 (symbol 2 in SSB) is on right side of SSS, shifted by 144 REs
++            re_offset = ssb_start_subcarrier + k + 144 + 4 * pil_idx;
++          } else {
++            re_offset = ssb_start_subcarrier + k + 4 * pil_idx;
++          }
++          c16_t pil = pilot[pil_idx];
++          c16_t rx = rxdataF[symb][aarx][re_offset];
++          // pil is already complex conjugate of transmitted DMRS
++          corr.r += (double)pil.r * rx.r - (double)pil.i * rx.i;
++          corr.i += (double)pil.r * rx.i + (double)pil.i * rx.r;
++          p_energy += (double)pil.r * pil.r + (double)pil.i * pil.i;
++          rx_energy += (double)rx.r * rx.r + (double)rx.i * rx.i;
++        }
++        total_corr_energy += corr.r * corr.r + corr.i * corr.i;
++        total_norm_energy += p_energy * rx_energy;
++      }
++    }
++  }
++
++  return (total_norm_energy > 0) ? (total_corr_energy / total_norm_energy) : 0.0;
++}
++
+ static bool search_neighboring_cell(UE_nr_rxtx_proc_t *proc,
+                                     NR_DL_FRAME_PARMS *frame_parms,
+                                     fapi_nr_neighboring_cell_t *nr_neighboring_cell,
+@@ -341,18 +408,20 @@ static bool search_neighboring_cell(UE_nr_rxtx_proc_t *proc,
+     const int N_L = (frame_parms->Lmax == 4) ? 4 : 8;
+     const int N_hf = (frame_parms->Lmax == 4) ? 2 : 1;
+     double metric = 0;
++    double max_norm_dmrs = 0;
+     // loops over possible pbch dmrs cases to retrieve best estimated i_ssb (and n_hf for Lmax=4) for multiple ssb detection
+     for (int hf = 0; hf < N_hf; hf++) {
+       for (int l = 0; l < N_L; l++) {
+         // computing correlation between received DMRS symbols and transmitted sequence for current i_ssb and n_hf
+         cd_t cumul = {0};
++        const uint32_t *gold = nr_gold_pbch(frame_parms->Lmax, search_params.sss_res.nid_cell, hf, l);
+         for (int i = pbch_initial_symbol; i < pbch_initial_symbol + 3; i++) {
+           c32_t meas = nr_pbch_dmrs_correlation(frame_parms,
+                                                 i,
+                                                 i - pbch_initial_symbol,
+                                                 search_params.sss_res.nid_cell,
+                                                 search_params.ssb_start_subcarrier,
+-                                                nr_gold_pbch(frame_parms->Lmax, search_params.sss_res.nid_cell, hf, l),
++                                                gold,
+                                                 rxdataF[i]);
+           csum(cumul, cumul, meas);
+         }
+@@ -360,9 +429,17 @@ static bool search_neighboring_cell(UE_nr_rxtx_proc_t *proc,
+         if (metric < tmp) {
+           metric = tmp;
+         }
++        double norm_dmrs = nr_compute_normalized_dmrs(frame_parms,
++                                                      search_params.sss_res.nid_cell,
++                                                      search_params.ssb_start_subcarrier,
++                                                      gold,
++                                                      rxdataF);
++        if (max_norm_dmrs < norm_dmrs) {
++          max_norm_dmrs = norm_dmrs;
++        }
+       }
+     }
+-    cell_detected = metric > NR_PBCH_DMRS_METRIC_FLOOR ? true : false;
++    cell_detected = (metric > NR_PBCH_DMRS_METRIC_FLOOR) && (max_norm_dmrs > 0.25);
+   }
+ 
+   if (cell_detected) {
+@@ -376,8 +453,10 @@ static bool search_neighboring_cell(UE_nr_rxtx_proc_t *proc,
+           search_params.pss_res.avg);
+ 
+     // Update search window
+-    neighboring_cell_info->pss_search_start = search_params.pss_res.pos - 16;
+-    neighboring_cell_info->pss_search_length = 32 + frame_parms->ofdm_symbol_size;
++    update_pss_search_window(neighboring_cell_info,
++                             search_params.pss_res.pos,
++                             frame_parms->samples_per_slot_wCP,
++                             frame_parms->ofdm_symbol_size);
+     neighboring_cell_info->ssb_slot = proc->nr_slot_rx;
+   }
+ 
+@@ -385,6 +464,7 @@ static bool search_neighboring_cell(UE_nr_rxtx_proc_t *proc,
+ }
+ 
+ static bool validate_known_pci(NR_DL_FRAME_PARMS *frame_parms,
++                               uint16_t known_pci,
+                                fapi_nr_neighboring_cell_t *nr_neighboring_cell,
+                                neighboring_cell_info_t *neighboring_cell_info,
+                                c16_t **rxdata,
+@@ -392,7 +472,6 @@ static bool validate_known_pci(NR_DL_FRAME_PARMS *frame_parms,
+                                c16_t pssTime[][frame_parms->ofdm_symbol_size],
+                                int slot)
+ {
+-  int known_pci = nr_neighboring_cell->Nid_cell;
+ 
+   int length = neighboring_cell_info->pss_search_length;
+   c16_t *rx[frame_parms->nb_antennas_rx];
+@@ -466,8 +545,8 @@ static bool validate_known_pci(NR_DL_FRAME_PARMS *frame_parms,
+   nr_neighboring_cell->is_candidate = false;
+   neighboring_cell_info->consec_fail = 0;
+   neighboring_cell_info->valid_meas = true;
+-  neighboring_cell_info->pss_search_start += pss_res.pos - 16;
+-  neighboring_cell_info->pss_search_length = 32 + frame_parms->ofdm_symbol_size;
++  int pss_abs_pos = neighboring_cell_info->pss_search_start + pss_res.pos;
++  update_pss_search_window(neighboring_cell_info, pss_abs_pos, frame_parms->samples_per_slot_wCP, frame_parms->ofdm_symbol_size);
+   neighboring_cell_info->ssb_slot = slot;
+ 
+   return true;
+@@ -521,8 +600,9 @@ static void search_new_neighboring_cell(UE_nr_rxtx_proc_t *proc, PHY_VARS_NR_UE
+   int num_exclude_nid_cells = 1;
+   for (int i = 0; i < NUMBER_OF_NEIGHBORING_CELLS_MAX; i++) {
+     fapi_nr_neighboring_cell_t *cell = &ue->nrUE_config.meas_config.nr_neighboring_cell[i];
+-    if (cell->active && cell->Nid_cell != (uint16_t)-1 && cell->Nid_cell != frame_parms->Nid_cell) {
+-      exclude_nid_cells[num_exclude_nid_cells++] = cell->Nid_cell;
++    const uint16_t nid_cell = cell->Nid_cell;
++    if (cell->active && nid_cell <= 1007 && nid_cell != frame_parms->Nid_cell) {
++      exclude_nid_cells[num_exclude_nid_cells++] = nid_cell;
+     }
+   }
+ 
+@@ -557,6 +637,30 @@ static void search_new_neighboring_cell(UE_nr_rxtx_proc_t *proc, PHY_VARS_NR_UE
+   }
+ }
+ 
++bool is_neighboring_cell_due(const PHY_VARS_NR_UE *ue, int cell_idx, const UE_nr_rxtx_proc_t *proc)
++{
++  const fapi_nr_neighboring_cell_t *neighbor_cell = &ue->nrUE_config.meas_config.nr_neighboring_cell[cell_idx];
++  if (neighbor_cell->active == 0 || neighbor_cell->Nid_cell == (uint16_t)-1 || neighbor_cell->Nid_cell == ue->frame_parms.Nid_cell)
++    return false;
++
++  const uint32_t serving_ssb_freq = get_ssb_arfcn(&ue->frame_parms);
++  if (neighbor_cell->ssb_freq != 0 && neighbor_cell->ssb_freq != serving_ssb_freq)
++    return false;
++
++  const neighboring_cell_info_t *cell_info = &ue->measurements.neighboring_cell_info[cell_idx];
++  const int spf = ue->frame_parms.slots_per_frame;
++  const int cycle = 1024 * spf;
++  const int now = proc->frame_rx * spf + proc->nr_slot_rx;
++
++  if (cell_info->pss_search_length == 0 || cell_info->ssb_slot == -1)
++    return cell_info->last_meas_slot < 0 || (now - cell_info->last_meas_slot + cycle) % cycle >= spf + 1;
++
++  if (proc->nr_slot_rx != cell_info->ssb_slot)
++    return false;
++
++  return cell_info->last_meas_slot < 0 || (now - cell_info->last_meas_slot + cycle) % cycle >= NR_UE_MEAS_PERIOD_MS * spf / 10;
++}
++
+ static void do_neighboring_cell_measurements(UE_nr_rxtx_proc_t *proc, PHY_VARS_NR_UE *ue, c16_t **rxdata)
+ {
+   // Generate PSS time-domain sequences once for all neighbor cells
+@@ -573,28 +677,35 @@ static void do_neighboring_cell_measurements(UE_nr_rxtx_proc_t *proc, PHY_VARS_N
+   const uint32_t rxdataF_sz = frame_parms->ofdm_symbol_size;
+   __attribute__((aligned(32))) c16_t rxdataF[NR_N_SYMBOLS_SSB][frame_parms->nb_antennas_rx][rxdataF_sz];
+ 
++  const int spf = frame_parms->slots_per_frame;
++  const int now = proc->frame_rx * spf + proc->nr_slot_rx;
++
+   for (int cell_idx = 0; cell_idx < NUMBER_OF_NEIGHBORING_CELLS_MAX; cell_idx++) {
+-    fapi_nr_neighboring_cell_t *neighbor_cell = &ue->nrUE_config.meas_config.nr_neighboring_cell[cell_idx];
+-    if (neighbor_cell->active == 0 || neighbor_cell->Nid_cell == (uint16_t)-1 || neighbor_cell->Nid_cell == frame_parms->Nid_cell) {
++    if (!is_neighboring_cell_due(ue, cell_idx, proc)) // PR 1142: per-cell schedule
+       continue;
+-    }
+ 
++    fapi_nr_neighboring_cell_t *neighbor_cell = &ue->nrUE_config.meas_config.nr_neighboring_cell[cell_idx];
++    // PR 1009: read the PCI once; nr_ue_phy_config_request() may overwrite the config meanwhile
++    const uint16_t nid_cell = neighbor_cell->Nid_cell;
++    if (nid_cell > 1007 || nid_cell == frame_parms->Nid_cell)
++      continue;
+     neighboring_cell_info_t *neighboring_cell_info = &ue->measurements.neighboring_cell_info[cell_idx];
+     if (neighboring_cell_info->pss_search_length == 0) {
+       neighboring_cell_info->pss_search_length = frame_parms->samples_per_slot_wCP + frame_parms->ofdm_symbol_size;
+       neighboring_cell_info->ssb_slot = -1;
+     }
+ 
+-    if (neighboring_cell_info->ssb_slot != -1 && neighboring_cell_info->ssb_slot != proc->nr_slot_rx)
+-      continue;
++    // PR 1142: the slot check is in is_neighboring_cell_due()
++    if (!validate_known_pci(frame_parms, nid_cell, neighbor_cell, neighboring_cell_info, rxdata, rxdataF, pssTime, proc->nr_slot_rx)) {
++      if (neighboring_cell_info->ssb_slot == -1)
++        neighboring_cell_info->last_meas_slot = now;
+ 
+-    if (!validate_known_pci(frame_parms, neighbor_cell, neighboring_cell_info, rxdata, rxdataF, pssTime, proc->nr_slot_rx)) {
+       if (neighboring_cell_info->consec_fail >= NEIGHBOR_CELL_MAX_CONSECUTIVE_FAILURES) {
+         if (neighbor_cell->is_candidate) {
+-          LOG_D(NR_PHY, "Neighbor cell confirmation failed for candidate with PCI=%d\n", neighbor_cell->Nid_cell);
++          LOG_D(NR_PHY, "Neighbor cell confirmation failed for candidate with PCI=%d\n", nid_cell);
+         } else {
+-          LOG_D(NR_PHY, "Max consecutive failures reached for PCI=%d, resetting to full search\n", neighbor_cell->Nid_cell);
+-          send_neighbor_cell_meas(ue, proc, neighbor_cell->Nid_cell, INT_MAX);
++          LOG_D(NR_PHY, "Max consecutive failures reached for PCI=%d, resetting to full search\n", nid_cell);
++          send_neighbor_cell_meas(ue, proc, nid_cell, INT_MAX);
+         }
+         reset_neighboring_cell_info(neighbor_cell,
+                                     neighboring_cell_info,
+@@ -603,11 +714,13 @@ static void do_neighboring_cell_measurements(UE_nr_rxtx_proc_t *proc, PHY_VARS_N
+       continue;
+     }
+ 
++    neighboring_cell_info->last_meas_slot = now;
++
+     // RSRP measurements
+     uint8_t sss_symbol = SSS_SYMBOL_NB - PSS_SYMBOL_NB;
+     // e2e-ts patch: RSRP of this neighbour only, not of all cells on the SSS REs (TS 38.215 5.1.1)
+     neighboring_cell_info->ssb_rsrp =
+-        nr_ue_calculate_ssb_rsrp_cell(frame_parms, rxdataF[sss_symbol], frame_parms->ssb_start_subcarrier, neighbor_cell->Nid_cell);
++        nr_ue_calculate_ssb_rsrp_cell(frame_parms, rxdataF[sss_symbol], frame_parms->ssb_start_subcarrier, nid_cell);
+ 
+     neighboring_cell_info->ssb_rsrp_dBm =
+         10 * log10(neighboring_cell_info->ssb_rsrp) + 30 - SQ15_SQUARED_NORM_FACTOR_DB
+@@ -615,7 +728,7 @@ static void do_neighboring_cell_measurements(UE_nr_rxtx_proc_t *proc, PHY_VARS_N
+         - dB_fixed(ue->frame_parms.ofdm_symbol_size);
+ 
+     // Send SS measurements to RRC directly
+-    send_neighbor_cell_meas(ue, proc, neighbor_cell->Nid_cell, neighboring_cell_info->ssb_rsrp_dBm);
++    send_neighbor_cell_meas(ue, proc, nid_cell, neighboring_cell_info->ssb_rsrp_dBm);
+   }
+ }
+ 
+diff --git a/openair1/PHY/NR_UE_TRANSPORT/sss_nr.c b/openair1/PHY/NR_UE_TRANSPORT/sss_nr.c
+index 1824ef97cb..ce0684b587 100644
+--- a/openair1/PHY/NR_UE_TRANSPORT/sss_nr.c
++++ b/openair1/PHY/NR_UE_TRANSPORT/sss_nr.c
+@@ -199,6 +199,7 @@ sss_detection_result_t rx_sss_nr(nr_sss_params_t *params,
+   // now do the SSS detection based on the precomputed sequences
+   int Nid1 = -1;
+   int64_t max_metric = 0;
++  int64_t max_excluded_metric = 0;
+   sss_detection_result_t res = {};
+   int64_t base_power = 0;
+   for (int i = 0; i < LENGTH_SSS_NR; i++) {
+@@ -216,18 +217,22 @@ sss_detection_result_t rx_sss_nr(nr_sss_params_t *params,
+     const c64_t rot = (c64_t){round(cos(angle) * INT16_MAX), round(sin(angle) * INT16_MAX)};
+     for (int n = 0; n < nb_nid1; n++) { // all possible Nid1 values
+       int n1 = nid1_start + n;
+-      if (skip_pci(n1, Nid2, params->exclude_nid_cells, params->num_exclude_nid_cells))
+-        continue;
++      bool is_excluded = skip_pci(n1, Nid2, params->exclude_nid_cells, params->num_exclude_nid_cells);
+       int64_t metric = 0;
+       for (int i = 0; i < LENGTH_SSS_NR; i++) {
+         // d_sss is only real part because sss is a pure real signal (imaginary is 0)
+         metric += d_sss[n][i] * (rot.r * sss_comp[i].r - rot.i * sss_comp[i].i);
+       }
+-      // if the current metric is better than the last save it
+-      if (metric > max_metric) {
+-        max_metric = metric;
+-        Nid1 = n1;
+-        res.phase = idx;
++      if (is_excluded) {
++        if (metric > max_excluded_metric)
++          max_excluded_metric = metric;
++      } else {
++        // if the current metric is better than the last save it
++        if (metric > max_metric) {
++          max_metric = metric;
++          Nid1 = n1;
++          res.phase = idx;
++        }
+       }
+ #ifdef DEBUG_SSS_NR
+       LOG_I(PHY,
+@@ -244,14 +249,15 @@ sss_detection_result_t rx_sss_nr(nr_sss_params_t *params,
+     // we try progressively rotation between pss and sss
+     // pss and sss are in phase at emission
+     // rotation means doppler variation, or very noisy pss detection
+-    if (max_metric / base_power >= SSS_METRIC_FLOOR_NR)
++    if (max_metric / base_power >= SSS_METRIC_FLOOR_NR || max_excluded_metric / base_power >= SSS_METRIC_FLOOR_NR)
+       break;
+   }
+ 
+-  if (max_metric / base_power < SSS_METRIC_FLOOR_NR) {
++  if (max_excluded_metric >= max_metric || max_metric / base_power < SSS_METRIC_FLOOR_NR) {
+     LOG_D(PHY,
+-          "Failed to detect SSS after PSS, metric of SSS %ld, threshold to consider SSS valid %d, detected PCI: %d\n",
++          "Failed to detect SSS after PSS, metric of SSS %ld (excluded %ld), threshold to consider SSS valid %d, detected PCI: %d\n",
+           max_metric,
++          max_excluded_metric,
+           SSS_METRIC_FLOOR_NR,
+           res.nid_cell);
+     res.success = false;
+diff --git a/openair1/PHY/defs_nr_UE.h b/openair1/PHY/defs_nr_UE.h
+index 09261a7e9c..937fd66eff 100644
+--- a/openair1/PHY/defs_nr_UE.h
++++ b/openair1/PHY/defs_nr_UE.h
+@@ -85,6 +85,9 @@ typedef struct {
+ 
+ #define NEIGHBOR_CELL_MAX_CONSECUTIVE_FAILURES 10
+ 
++/// minimum time between two measurements of the neighboring cells (TS 38.133 9.2.5.1)
++#define NR_UE_MEAS_PERIOD_MS 200
++
+ typedef struct {
+   int ssb_slot;
+   int pss_search_start;
+@@ -93,6 +96,8 @@ typedef struct {
+   int ssb_rsrp_dBm;
+   int consec_fail; // Counter for consecutive detection failures
+   bool valid_meas;
++  /// slot of the frame cycle (frame * slots_per_frame + slot) of the last measurement, -1 if none
++  int last_meas_slot;
+ } neighboring_cell_info_t;
+ 
+ typedef struct {
+@@ -154,8 +159,6 @@ typedef struct {
+   _Atomic(bool) search_new_cells_pending;
+   int last_blind_slot;
+   int last_slot;
+-  /// slot of the frame cycle (frame * slots_per_frame + slot) of the last neighboring cell measurement, -1 if none
+-  int last_meas_slot;
+ } PHY_NR_MEASUREMENTS;
+ 
+ typedef struct {
+diff --git a/openair1/SCHED_NR_UE/phy_procedures_nr_ue.c b/openair1/SCHED_NR_UE/phy_procedures_nr_ue.c
+index 22a281e058..cb4eb02d23 100644
+--- a/openair1/SCHED_NR_UE/phy_procedures_nr_ue.c
++++ b/openair1/SCHED_NR_UE/phy_procedures_nr_ue.c
+@@ -47,16 +47,13 @@
+ #include "T.h"
+ #include "instrumentation.h"
+ 
+-/// minimum time between two measurements of the neighboring cells (TS 38.133 9.2.5.1)
+-#define NR_UE_MEAS_PERIOD_MS 200
+-
+ static const unsigned int gain_table[31] = {100,  112,  126,  141,  158,  178,  200,  224,  251, 282,  316,
+                                             359,  398,  447,  501,  562,  631,  708,  794,  891, 1000, 1122,
+                                             1258, 1412, 1585, 1778, 1995, 2239, 2512, 2818, 3162};
+ 
+ static void nr_ue_prach_procedures(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, c16_t **txData);
+ 
+-static uint32_t get_ssb_arfcn(NR_DL_FRAME_PARMS *frame_parms)
++uint32_t get_ssb_arfcn(const NR_DL_FRAME_PARMS *frame_parms)
+ {
+   uint32_t band_size_hz = frame_parms->N_RB_DL * 12 * frame_parms->subcarrier_spacing;
+   int ssb_center_sc = frame_parms->ssb_start_subcarrier + 120; // ssb is 20 PRBs -> 240 sub-carriers
+@@ -843,6 +840,21 @@ static bool check_neighboring_cells_task(PHY_VARS_NR_UE *ue, bool task_pending)
+   return has_intra_freq_neighbors;
+ }
+ 
++static bool check_known_neighboring_cells_task(const PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, bool task_pending)
++{
++  if (task_pending) {
++    return false;
++  }
++
++  for (int cell_idx = 0; cell_idx < NUMBER_OF_NEIGHBORING_CELLS_MAX; cell_idx++) {
++    if (is_neighboring_cell_due(ue, cell_idx, proc)) {
++      return true;
++    }
++  }
++
++  return false;
++}
++
+ static bool is_ssb_index_transmitted(const PHY_VARS_NR_UE *ue, const int index)
+ {
+   if (ue->received_config_request) {
+@@ -1216,16 +1228,9 @@ int pbch_processing(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, nr_phy_da
+ 
+   PHY_NR_MEASUREMENTS *measurements = &ue->measurements;
+ 
+-  // Measurements on known neighboring cells, at most once per measurement period: TS 38.133 9.2.5.1, the intra-frequency
+-  // SSB measurement period is at least 200 ms
+-  const int spf = ue->frame_parms.slots_per_frame;
+-  const int cycle = 1024 * spf;
+-  const int now = proc->frame_rx * spf + proc->nr_slot_rx;
+-  const bool meas_period_elapsed =
+-      measurements->last_meas_slot < 0 || (now - measurements->last_meas_slot + cycle) % cycle >= NR_UE_MEAS_PERIOD_MS * spf / 10;
+-  if (meas_period_elapsed && check_neighboring_cells_task(ue, measurements->meas_request_pending)) {
++  // Measurements on known neighboring cells, at most once per measurement period per cell: TS 38.133 9.2.5.1
++  if (check_known_neighboring_cells_task(ue, proc, measurements->meas_request_pending)) {
+     measurements->meas_request_pending = true;
+-    measurements->last_meas_slot = now;
+     nr_meas_task_args_t *args = create_meas_task_args(proc, ue);
+     task_t t = {.func = nr_ue_meas_neighboring_cell, .args = args};
+     pushTpool(&get_nrUE_params()->Tpool, t);

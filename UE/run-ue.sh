@@ -32,6 +32,7 @@ rfsim=('--rfsimulator.[0].serveraddr' "$ran_ip" '--rfsimulator.[0].serverport' "
 
 work="$root/results/f1-smoke/$ue"
 mkdir -p "$work"; cd "$work"
-sudo ip netns exec "$ns" \
+# E2E_NEIGH_DIAG=1: neighbour-measurement diag lines (oai-ue-neigh-known-pci.patch); sudo drops it, so pass it on
+sudo ip netns exec "$ns" env E2E_NEIGH_DIAG="${E2E_NEIGH_DIAG:-0}" \
   "$root/upstream/oai/cmake_targets/ran_build/build/nr-uesoftmodem" \
   -O "$conf" --rfsim "${radio[@]}" "${rfsim[@]}" "$@" 2>&1 | tee "$ue.log"

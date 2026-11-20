@@ -1,0 +1,111 @@
+diff --git a/common/utils/nr/nr_common.c b/common/utils/nr/nr_common.c
+index d117eea..cd7fa01 100644
+--- a/common/utils/nr/nr_common.c
++++ b/common/utils/nr/nr_common.c
+@@ -98,6 +98,18 @@ uint8_t get_rsrp_index(int rsrp_dBm)
+   return (uint8_t)index;
+ }
+ 
++/* e2e-ts patch (oai-ue-rrc-rsrp-report.patch): get_rsrp_index() caps at -44 dBm (16..113, the L1-RSRP range).
++ * For L3 reports that cap is too low: a serving cell at -42 dBm is reported as -44 dBm, and the gap to a
++ * neighbour is too small. Compare before the addition, so that INT_MAX (no measurement) cannot overflow. */
++uint8_t get_rsrp_index_l3(int rsrp_dBm)
++{
++  if (rsrp_dBm <= -157)
++    return 0;
++  if (rsrp_dBm >= 127 - 157)
++    return 127;
++  return (uint8_t)(rsrp_dBm + 157);
++}
++
+ #define NUM_BW_ENTRIES 15
+ 
+ static const int tables_5_3_2[5][NUM_BW_ENTRIES] = {
+diff --git a/common/utils/nr/nr_common.h b/common/utils/nr/nr_common.h
+index e45b50d..fe0421c 100644
+--- a/common/utils/nr/nr_common.h
++++ b/common/utils/nr/nr_common.h
+@@ -185,7 +185,7 @@ typedef struct {
+ } NR_timer_t;
+ 
+ typedef struct val_init {
+-  int val;
++  float val; // e2e-ts patch (oai-ue-rrc-rsrp-report.patch): float, so the L3 filter does not lose the fraction
+   bool init;
+ } val_init_t;
+ 
+@@ -221,6 +221,11 @@ typedef struct {
+ /** @brief Returns NR RSRP index per 3GPP TS 38.133 Table 10.1.6.1-1 */
+ uint8_t get_rsrp_index(int rsrp_dBm);
+ 
++/** @brief e2e-ts patch (oai-ue-rrc-rsrp-report.patch): RSRP-Range index (0..127, TS 38.331) for L3 reports
++ *  (MeasurementReport), index = RSRP + 157 per TS 38.133 Table 10.1.6.1-1. get_rsrp_index() stays for L1-RSRP
++ *  (CSI report, 7 bits): the gNB accepts only 16..113 there (gNB_scheduler_uci.c get_measured_rsrp()). */
++uint8_t get_rsrp_index_l3(int rsrp_dBm);
++
+ /**
+  * @brief To start a timer
+  * @param timer Timer to be started
+diff --git a/openair2/RRC/NR_UE/rrc_UE.c b/openair2/RRC/NR_UE/rrc_UE.c
+index 94c896d..fe9a182 100644
+--- a/openair2/RRC/NR_UE/rrc_UE.c
++++ b/openair2/RRC/NR_UE/rrc_UE.c
+@@ -3065,9 +3065,12 @@ static void nr_rrc_ue_send_ul_information_transfer_nas(NR_UE_RRC_INST_t *rrc, ui
+ 
+ static void apply_ema(val_init_t *vi_rsrp_dBm, float filter_coeff_rsrp, int rsrp_dBm)
+ {
+-  int *quant = &vi_rsrp_dBm->val;
++  float *quant = &vi_rsrp_dBm->val;
+   bool *meas_init = &vi_rsrp_dBm->init;
+   float coef = *meas_init ? filter_coeff_rsrp : 1.0f; // if not init, first measurement gets full weight
++  // e2e-ts patch (oai-ue-rrc-rsrp-report.patch): the state is a float now. Before, the cast to int cut toward
++  // zero, so for negative dBm the value stuck up to (1 / coef - 1) dB above a constant input (lab: PHY -52 dBm ->
++  // L3 -51 dBm). Rounding the int state is not enough: with coef 0.5 it still sticks 1 dB off on a rising input.
+   *quant = (1.0f - coef) * (*quant) + coef * rsrp_dBm;
+   *meas_init = true;
+ }
+@@ -3088,12 +3091,18 @@ void nr_ue_meas_filtering(rrcPerNB_t *rrc, meas_t *meas_cell, uint16_t Nid_cell,
+     apply_ema(&meas_cell->ss_rsrp_dBm, l3_measurements->ssb_filter_coeff_rsrp, rsrp_dBm);
+ }
+ 
++/* e2e-ts patch (oai-ue-rrc-rsrp-report.patch): L3-filtered RSRP in whole dBm, rounded (not cut) */
++static int rsrp_dBm_value(const val_init_t *v)
++{
++  return (int)lroundf(v->val);
++}
++
+ static int get_rsrp_value(const meas_t *cell)
+ {
+   if (cell->ss_rsrp_dBm.init)
+-    return cell->ss_rsrp_dBm.val;
++    return rsrp_dBm_value(&cell->ss_rsrp_dBm);
+   if (cell->csi_rsrp_dBm.init)
+-    return cell->csi_rsrp_dBm.val;
++    return rsrp_dBm_value(&cell->csi_rsrp_dBm);
+   return INT_MAX;
+ }
+ 
+@@ -4048,8 +4057,8 @@ void rrc_ue_generate_measurementReport(rrcPerNB_t *rrc, instance_t ue_id, int me
+   uint8_t buffer[NR_RRC_BUF_SIZE];
+   l3_measurements_t *l3m = &rrc->l3_measurements;
+   meas_report_params_t *params = &l3m->meas_report[meas_id];
+-  int rsrp_dBm = params->rs_type == NR_NR_RS_Type_ssb ? l3m->serving_cell.ss_rsrp_dBm.val : l3m->serving_cell.csi_rsrp_dBm.val;
+-  int rsrp_index = get_rsrp_index(rsrp_dBm);
++  int rsrp_dBm = rsrp_dBm_value(params->rs_type == NR_NR_RS_Type_ssb ? &l3m->serving_cell.ss_rsrp_dBm : &l3m->serving_cell.csi_rsrp_dBm);
++  int rsrp_index = get_rsrp_index_l3(rsrp_dBm); // e2e-ts patch: L3 range, not the L1 range capped at -44 dBm
+   uint16_t neighbor_pcis[NUMBER_OF_NEIGHBORING_CELLS_MAX];
+   int neighbor_rsrp_indexes[NUMBER_OF_NEIGHBORING_CELLS_MAX];
+   int num_neighbors = 0;
+@@ -4067,9 +4076,9 @@ void rrc_ue_generate_measurementReport(rrcPerNB_t *rrc, instance_t ue_id, int me
+ 
+       if (is_valid) {
+         neighbor_pcis[num_neighbors] = l3m->neighboring_cell[i].Nid_cell;
+-        int neighbor_rsrp_dBm = params->rs_type == NR_NR_RS_Type_ssb ? l3m->neighboring_cell[i].ss_rsrp_dBm.val
+-                                                                     : l3m->neighboring_cell[i].csi_rsrp_dBm.val;
+-        neighbor_rsrp_indexes[num_neighbors] = get_rsrp_index(neighbor_rsrp_dBm);
++        int neighbor_rsrp_dBm = rsrp_dBm_value(params->rs_type == NR_NR_RS_Type_ssb ? &l3m->neighboring_cell[i].ss_rsrp_dBm
++                                                                                     : &l3m->neighboring_cell[i].csi_rsrp_dBm);
++        neighbor_rsrp_indexes[num_neighbors] = get_rsrp_index_l3(neighbor_rsrp_dBm); // e2e-ts patch: L3 range
+         num_neighbors++;
+       }
+     }

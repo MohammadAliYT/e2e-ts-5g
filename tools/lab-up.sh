@@ -8,6 +8,8 @@
 #   HUB_INIT='cmd;cmd'         hub commands sent before the DUs start
 #                              (default 'loss ue1 du2 10;loss ue2 du1 10': UE1 near DU1, UE2 near DU2)
 #   UE1_EXTRA='...'            extra nr-uesoftmodem options for UE1 (e.g. --log_config.nr_rrc_log_level debug)
+#   E2E_NEIGH_DIAG=1           both UEs log the neighbour-measurement diag lines (needed by tools/neigh-meas-test.sh;
+#                              default 0 = off; oai-ue-neigh-known-pci.patch)
 # The old modes (normal, gate, gate-samefreq, gate-samefreq-ssb0) are in the git history.
 set -uo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -82,11 +84,11 @@ for ((j=1; j<=ndu; j++)); do
 done
 
 echo "== UEs via hub (one after another -> CU UE IDs 1 and 2)"
-bg ue1 UE/run-ue.sh ue1 ${UE1_EXTRA:-}   # UE1_EXTRA unquoted: split into words
+bg ue1 env E2E_NEIGH_DIAG="${E2E_NEIGH_DIAG:-0}" UE/run-ue.sh ue1 ${UE1_EXTRA:-}   # UE1_EXTRA unquoted: split into words
 wait_for "UE1 has IP" 90 "$(ue_ip_test "$UE1_NS" ue1)"
 ues=(1)
 if ((nue >= 2)); then
-  bg ue2 UE/run-ue.sh ue2
+  bg ue2 env E2E_NEIGH_DIAG="${E2E_NEIGH_DIAG:-0}" UE/run-ue.sh ue2
   wait_for "UE2 has IP" 90 "$(ue_ip_test "$UE2_NS" ue2)"
   ues=(1 2)
 fi
