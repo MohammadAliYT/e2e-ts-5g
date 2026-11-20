@@ -1,0 +1,237 @@
+diff --git a/openair2/E2AP/RAN_FUNCTION/O-RAN/ran_func_rc.c b/openair2/E2AP/RAN_FUNCTION/O-RAN/ran_func_rc.c
+index 16de61e..f461d82 100644
+--- a/openair2/E2AP/RAN_FUNCTION/O-RAN/ran_func_rc.c
++++ b/openair2/E2AP/RAN_FUNCTION/O-RAN/ran_func_rc.c
+@@ -957,6 +957,32 @@ static rc_ind_data_t* fill_context_info_on_demand(const e2sm_rc_act_def_frmt_1_t
+   return rc_ind;
+ }
+ 
++/* e2e-ts: one REPORT style 1 RAN parameter "UE ID" (E2SM_RC_RS1_UE_ID): the UE ID of this node type,
++ * APER-encoded as UEID, in an OCTET STRING. Used by fill_ue_id() and by the RRC message copy. */
++static void fill_ue_id_param(const gNB_RRC_UE_t *rrc_ue_context, seq_ran_param_t *param)
++{
++  param->ran_param_id = E2SM_RC_RS1_UE_ID;
++  param->ran_param_val.type = ELEMENT_KEY_FLAG_FALSE_RAN_PARAMETER_VAL_TYPE;
++  param->ran_param_val.flag_false = malloc_or_fail(sizeof(ran_parameter_value_t));
++  param->ran_param_val.flag_false->type = OCTET_STRING_RAN_PARAMETER_VALUE;
++
++  const ngran_node_t node_type = get_e2_node_type();
++  ue_id_e2sm_t ue_id_data = fill_ue_id_data[node_type](rrc_ue_context, 0, 0);
++
++  UEID_t enc_ue_id_data = enc_ue_id_asn(&ue_id_data);
++
++  const enum asn_transfer_syntax syntax = ATS_ALIGNED_BASIC_PER;
++  asn_encode_to_new_buffer_result_t res = asn_encode_to_new_buffer(NULL, syntax, &asn_DEF_UEID, &enc_ue_id_data);
++  assert(res.buffer != NULL && res.result.encoded > 0 && "[E2 agent] Failed to encode UE ID.");
++  byte_array_t ba = {.buf = res.buffer, .len = res.result.encoded};
++
++  param->ran_param_val.flag_false->octet_str_ran = copy_byte_array(ba);
++
++  free_ue_id_e2sm(&ue_id_data);
++  ASN_STRUCT_RESET(asn_DEF_UEID, &enc_ue_id_data);
++  free(res.buffer);
++}
++
+ static rc_ind_data_t* fill_ue_id(const gNB_RRC_UE_t *rrc_ue_context, const uint16_t cond_id)
+ {
+   rc_ind_data_t* rc_ind = malloc_or_fail(sizeof(rc_ind_data_t));
+@@ -974,30 +1000,11 @@ static rc_ind_data_t* fill_ue_id(const gNB_RRC_UE_t *rrc_ue_context, const uint1
+   rc_ind->msg.frmt_1.seq_ran_param = calloc_or_fail(rc_ind->msg.frmt_1.sz_seq_ran_param, sizeof(seq_ran_param_t));
+ 
+   // Fill the RAN Parameter details for UE ID
+-  rc_ind->msg.frmt_1.seq_ran_param[0].ran_param_id = E2SM_RC_RS1_UE_ID;
+-  rc_ind->msg.frmt_1.seq_ran_param[0].ran_param_val.type = ELEMENT_KEY_FLAG_FALSE_RAN_PARAMETER_VAL_TYPE;
+-  rc_ind->msg.frmt_1.seq_ran_param[0].ran_param_val.flag_false = malloc_or_fail(sizeof(ran_parameter_value_t));
+-  rc_ind->msg.frmt_1.seq_ran_param[0].ran_param_val.flag_false->type = OCTET_STRING_RAN_PARAMETER_VALUE;
+-
+-  const ngran_node_t node_type = get_e2_node_type();
+-  ue_id_e2sm_t ue_id_data = fill_ue_id_data[node_type](rrc_ue_context, 0, 0);
+-
+-  UEID_t enc_ue_id_data = enc_ue_id_asn(&ue_id_data);
+-
+-  const enum asn_transfer_syntax syntax = ATS_ALIGNED_BASIC_PER;
+-  asn_encode_to_new_buffer_result_t res = asn_encode_to_new_buffer(NULL, syntax, &asn_DEF_UEID, &enc_ue_id_data);
+-  assert(res.buffer != NULL && res.result.encoded > 0 && "[E2 agent] Failed to encode UE ID.");
+-  byte_array_t ba = {.buf = res.buffer, .len = res.result.encoded};
+-
+-  rc_ind->msg.frmt_1.seq_ran_param[0].ran_param_val.flag_false->octet_str_ran = copy_byte_array(ba);
++  fill_ue_id_param(rrc_ue_context, &rc_ind->msg.frmt_1.seq_ran_param[0]);
+ 
+   // Call Process ID
+   rc_ind->proc_id = NULL;
+ 
+-  free_ue_id_e2sm(&ue_id_data);
+-  ASN_STRUCT_RESET(asn_DEF_UEID, &enc_ue_id_data);
+-  free(res.buffer);
+-
+   return rc_ind;
+ }
+ 
+@@ -1062,7 +1069,9 @@ void signal_rrc_state_changed_to(const gNB_RRC_UE_t *rrc_ue_context, const rrc_s
+   pthread_mutex_unlock(&rc_mutex);
+ }
+ 
+-static rc_ind_data_t* fill_rrc_msg_copy(const byte_array_t rrc_ba, const uint16_t cond_id)
++/* e2e-ts: with_ue_id adds the UE ID as a 2nd RAN parameter (E2SM-RC 8.2.1, REPORT style 1, ID 4),
++ * so that the RIC knows which UE sent or receives the copied RRC message. */
++static rc_ind_data_t* fill_rrc_msg_copy(const gNB_RRC_UE_t *ue, const byte_array_t rrc_ba, const uint16_t cond_id, const bool with_ue_id)
+ {
+   rc_ind_data_t* rc_ind = malloc_or_fail(sizeof(rc_ind_data_t));
+ 
+@@ -1076,7 +1085,7 @@ static rc_ind_data_t* fill_rrc_msg_copy(const byte_array_t rrc_ba, const uint16_
+ 
+   // Sequence of
+   // RAN Parameter
+-  rc_ind->msg.frmt_1.sz_seq_ran_param = 1;
++  rc_ind->msg.frmt_1.sz_seq_ran_param = with_ue_id ? 2 : 1;
+   rc_ind->msg.frmt_1.seq_ran_param = calloc_or_fail(rc_ind->msg.frmt_1.sz_seq_ran_param, sizeof(seq_ran_param_t));
+ 
+   rc_ind->msg.frmt_1.seq_ran_param[0].ran_param_id = E2SM_RC_RS1_RRC_MESSAGE;
+@@ -1086,13 +1095,31 @@ static rc_ind_data_t* fill_rrc_msg_copy(const byte_array_t rrc_ba, const uint16_
+   
+   rc_ind->msg.frmt_1.seq_ran_param[0].ran_param_val.flag_false->octet_str_ran = copy_byte_array(rrc_ba);
+ 
++  if (with_ue_id)
++    fill_ue_id_param(ue, &rc_ind->msg.frmt_1.seq_ran_param[1]);
++
+   // Call Process ID
+   rc_ind->proc_id = NULL;
+ 
+   return rc_ind;
+ }
+ 
+-static void check_rrc_msg_copy(const nr_rrc_class_e nr_channel, const uint32_t rrc_msg_id, const byte_array_t rrc_ba, const uint32_t ric_req_id, const e2sm_rc_ev_trg_frmt_1_t *frmt_1)
++/* e2e-ts: true if the action definition of subscription ric_req_id also lists the "UE ID" parameter
++ * (get_list_for_report_style() then put it in rs1_param4 too). Caller holds rc_mutex. */
++static bool subs_wants_ue_id(const uint32_t ric_req_id)
++{
++  if (rc_subs_data.rs1_param4.data == NULL)
++    return false;
++  const size_t num_subs = seq_arr_size(&rc_subs_data.rs1_param4);
++  for (size_t sub_idx = 0; sub_idx < num_subs; sub_idx++) {
++    const ran_param_data_t *data = (const ran_param_data_t *)seq_arr_at(&rc_subs_data.rs1_param4, sub_idx);
++    if (data->ric_req_id == ric_req_id)
++      return true;
++  }
++  return false;
++}
++
++static void check_rrc_msg_copy(const gNB_RRC_UE_t *ue, const nr_rrc_class_e nr_channel, const uint32_t rrc_msg_id, const byte_array_t rrc_ba, const uint32_t ric_req_id, const e2sm_rc_ev_trg_frmt_1_t *frmt_1)
+ {
+   for (size_t i = 0; i < frmt_1->sz_msg_ev_trg; i++) {
+     if (frmt_1->msg_ev_trg[i].msg_type != RRC_MSG_MSG_TYPE_EV_TRG)
+@@ -1100,13 +1127,22 @@ static void check_rrc_msg_copy(const nr_rrc_class_e nr_channel, const uint32_t r
+     if (frmt_1->msg_ev_trg[i].rrc_msg.type != NR_RRC_MESSAGE_ID)
+       continue;
+     if (frmt_1->msg_ev_trg[i].rrc_msg.nr == nr_channel && frmt_1->msg_ev_trg[i].rrc_msg.rrc_msg_id == rrc_msg_id) {
+-      rc_ind_data_t* rc_ind_data = fill_rrc_msg_copy(rrc_ba, frmt_1->msg_ev_trg[i].ev_trigger_cond_id);
++      const bool with_ue_id = ue != NULL && subs_wants_ue_id(ric_req_id);
++      rc_ind_data_t* rc_ind_data = fill_rrc_msg_copy(ue, rrc_ba, frmt_1->msg_ev_trg[i].ev_trigger_cond_id, with_ue_id);
++      LOG_I(NR_RRC,
++            "[e2e-ts] RC msg copy: CU UE ID %d class %d msg %u %zu B ue_id %d ric_req_id %u\n",
++            ue != NULL ? (int)ue->rrc_ue_id : -1,
++            nr_channel,
++            rrc_msg_id,
++            rrc_ba.len,
++            with_ue_id,
++            ric_req_id);
+       send_aper_ric_ind(ric_req_id, rc_ind_data);
+     }
+   }
+ }
+ 
+-void signal_rrc_msg(const nr_rrc_class_e nr_channel, const uint32_t rrc_msg_id, const byte_array_t rrc_ba)
++void signal_rrc_msg(const gNB_RRC_UE_t *ue, const nr_rrc_class_e nr_channel, const uint32_t rrc_msg_id, const byte_array_t rrc_ba)
+ {
+   pthread_mutex_lock(&rc_mutex);
+   if (rc_subs_data.rs1_param3.data == NULL) {
+@@ -1117,7 +1153,7 @@ void signal_rrc_msg(const nr_rrc_class_e nr_channel, const uint32_t rrc_msg_id,
+   const size_t num_subs = seq_arr_size(&rc_subs_data.rs1_param3);
+   for (size_t sub_idx = 0; sub_idx < num_subs; sub_idx++) {
+     const ran_param_data_t data = *(const ran_param_data_t *)seq_arr_at(&rc_subs_data.rs1_param3, sub_idx);
+-    check_rrc_msg_copy(nr_channel, rrc_msg_id, rrc_ba, data.ric_req_id, &data.ev_tr.frmt_1);
++    check_rrc_msg_copy(ue, nr_channel, rrc_msg_id, rrc_ba, data.ric_req_id, &data.ev_tr.frmt_1);
+   }
+ 
+   pthread_mutex_unlock(&rc_mutex);
+diff --git a/openair2/E2AP/RAN_FUNCTION/O-RAN/ran_func_rc_extern.h b/openair2/E2AP/RAN_FUNCTION/O-RAN/ran_func_rc_extern.h
+index 7d7df66..0a8a97e 100644
+--- a/openair2/E2AP/RAN_FUNCTION/O-RAN/ran_func_rc_extern.h
++++ b/openair2/E2AP/RAN_FUNCTION/O-RAN/ran_func_rc_extern.h
+@@ -10,7 +10,8 @@
+ #include "openair2/E2AP/flexric/src/lib/3gpp/ie/network_interface_type.h"
+ #include "openair2/E2AP/flexric/src/sm/rc_sm/ie/ir/rrc_state.h"
+ 
+-void signal_rrc_msg(const nr_rrc_class_e nr_channel, const uint32_t rrc_msg_id, const byte_array_t rrc_ba);
++/* e2e-ts: ue = the UE that sent or receives the message (its UE ID goes into the copy if subscribed) */
++void signal_rrc_msg(const gNB_RRC_UE_t *ue, const nr_rrc_class_e nr_channel, const uint32_t rrc_msg_id, const byte_array_t rrc_ba);
+ 
+ void signal_ue_id(const gNB_RRC_UE_t *rrc_ue_context, const uint16_t class, const uint32_t msg_id);
+ 
+diff --git a/openair2/RRC/NR/rrc_gNB.c b/openair2/RRC/NR/rrc_gNB.c
+index c86db45..566dbb3 100644
+--- a/openair2/RRC/NR/rrc_gNB.c
++++ b/openair2/RRC/NR/rrc_gNB.c
+@@ -88,11 +88,11 @@
+ 
+ #ifdef E2_AGENT
+ #include "openair2/E2AP/RAN_FUNCTION/O-RAN/ran_func_rc_extern.h"
+-#define E2_AGENT_SIGNAL_DL_DCCH_RRC_MSG(BUF, LEN, ID)    \
++#define E2_AGENT_SIGNAL_DL_DCCH_RRC_MSG(UE, BUF, LEN, ID) \
+   do {                                                   \
+     byte_array_t buffer_ba = {.len = LEN};               \
+     buffer_ba.buf = (uint8_t *)BUF;                      \
+-    signal_rrc_msg(DL_DCCH_NR_RRC_CLASS, ID, buffer_ba); \
++    signal_rrc_msg(UE, DL_DCCH_NR_RRC_CLASS, ID, buffer_ba); \
+   } while (0)
+ #endif
+ 
+@@ -362,7 +362,7 @@ void nr_rrc_transfer_protected_rrc_message(const gNB_RRC_INST *rrc,
+                        &data);
+ 
+ #ifdef E2_AGENT
+-  E2_AGENT_SIGNAL_DL_DCCH_RRC_MSG(buffer, size, message_id);
++  E2_AGENT_SIGNAL_DL_DCCH_RRC_MSG(ue_p, buffer, size, message_id);
+ #else
+   UNUSED(message_id);
+ #endif
+@@ -1293,7 +1293,7 @@ static void rrc_gNB_generate_RRCReestablishment(rrc_gNB_ue_context_t *ue_context
+   nr_pdcp_data_req_srb(ue_p->rrc_ue_id, DL_SCH_LCID_DCCH, rrc_gNB_mui++, size, (unsigned char *const)buffer, rrc_deliver_dl_rrc_message, &data);
+ 
+ #ifdef E2_AGENT
+-  E2_AGENT_SIGNAL_DL_DCCH_RRC_MSG(buffer, size, NR_DL_DCCH_MessageType__c1_PR_rrcReestablishment);
++  E2_AGENT_SIGNAL_DL_DCCH_RRC_MSG(ue_p, buffer, size, NR_DL_DCCH_MessageType__c1_PR_rrcReestablishment);
+ #endif
+ 
+   /* RRCReestablishment has been generated, let's enable ciphering now. */
+@@ -2391,7 +2391,7 @@ static int rrc_gNB_decode_dcch(gNB_RRC_INST *rrc, const f1ap_ul_rrc_message_t *m
+     const uint32_t rrc_msg_id = ul_dcch_msg->message.choice.c1->present;
+     byte_array_t buffer_ba = {.len = msg->rrc_container_length};
+     buffer_ba.buf = msg->rrc_container;
+-    signal_rrc_msg(UL_DCCH_NR_RRC_CLASS, rrc_msg_id, buffer_ba);
++    signal_rrc_msg(UE, UL_DCCH_NR_RRC_CLASS, rrc_msg_id, buffer_ba);
+ #endif
+     switch (ul_dcch_msg->message.choice.c1->present) {
+       case NR_UL_DCCH_MessageType__c1_PR_NOTHING:
+@@ -4189,7 +4189,7 @@ void rrc_gNB_generate_RRCRelease(gNB_RRC_INST *rrc, gNB_RRC_UE_t *UE)
+     nrdc_scg_ue_release(rrc, UE);
+ 
+ #ifdef E2_AGENT
+-  E2_AGENT_SIGNAL_DL_DCCH_RRC_MSG(buffer, size, NR_DL_DCCH_MessageType__c1_PR_rrcRelease);
++  E2_AGENT_SIGNAL_DL_DCCH_RRC_MSG(UE, buffer, size, NR_DL_DCCH_MessageType__c1_PR_rrcRelease);
+ #endif
+ }
+ 
+diff --git a/openair2/RRC/NR/rrc_gNB_mobility.c b/openair2/RRC/NR/rrc_gNB_mobility.c
+index 1b0b68e..5af8af8 100644
+--- a/openair2/RRC/NR/rrc_gNB_mobility.c
++++ b/openair2/RRC/NR/rrc_gNB_mobility.c
+@@ -243,7 +243,7 @@ void rrc_gNB_trigger_reconfiguration_for_handover(gNB_RRC_INST *rrc, gNB_RRC_UE_
+   uint32_t message_id = NR_DL_DCCH_MessageType__c1_PR_rrcReconfiguration;
+   byte_array_t buffer_ba = {.len = rrc_reconf_len};
+   buffer_ba.buf = rrc_reconf;
+-  signal_rrc_msg(DL_DCCH_NR_RRC_CLASS, message_id, buffer_ba);
++  signal_rrc_msg(ue, DL_DCCH_NR_RRC_CLASS, message_id, buffer_ba);
+ #endif
+ }
+ 
