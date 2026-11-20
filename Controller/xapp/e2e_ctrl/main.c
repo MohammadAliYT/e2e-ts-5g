@@ -5,6 +5,8 @@
  * update the UE view (per CU UE ID: serving DU, RNTI, handovers, activity, medians), write
  * one state CSV row per UE, and run the commands from the FIFO (act/cmd_fifo.h):
  * "ho <CU UE ID> <DU number>" sends an RC handover with that DU's cell as explicit target.
+ * Phase 1b: RC REPORT style 1 on the CU gives a copy of every UE MeasurementReport with the UE ID
+ * (serving + up to MAX_NB neighbour RSRP per CU UE ID, last columns of the CSV).
  *
  *   e2/       talk to the RAN over E2 (node list, F1 Setup, subscriptions)
  *   collect/  turn E2 reports into state (one file per report type)

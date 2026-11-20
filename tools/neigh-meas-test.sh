@@ -24,7 +24,9 @@
 #       (10 -> ~10, 6 -> ~6, 3 -> ~4.8, 0 -> ~3 dB); 25 dB: neighbour detected (kept, and added again after 60 dB);
 #       60 dB: LOST 1, then 53 b only and conf 0.
 # Only this script may change the hub while it runs. The moved loss is set back to 10 dB at the end.
-# Usage: [MOVE=ue1|ue2] [SETTLE=5] tools/neigh-meas-test.sh [default seconds per step] ["loss[:seconds] ..."]
+# With CTRL_CSV=<controller CSV> (controller started with E2E_CSV=<same path>) it also prints the controller's
+# last values for the moving UE (phase 1b; target: controller = CU - 1 dB, same gap).
+# Usage: [MOVE=ue1|ue2] [SETTLE=5] [CTRL_CSV=...] tools/neigh-meas-test.sh [default seconds per step] ["loss[:seconds] ..."]
 #   default steps: "10:40 6:40 3:40 0:20 10:40 25:40 60:60 25:40 10:40"
 set -uo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -65,6 +67,18 @@ cu_vals() { awk -v id="$CUID" '/^UE [0-9]+ CU UE ID/ {u = ($6 == id)} u && /serv
     u && /resultSSB: RSRP/ {v[w] = $3}
     END {if ("s" in v && "n" in v) printf "serving %s neighbour %s gap %d", v["s"], v["n"], v["s"] - v["n"]
          else printf "serving %s neighbour %s", ("s" in v ? v["s"] : "-"), ("n" in v ? v["n"] : "-")}' "$CUSTATS"; }
+# Controller (phase 1b): last CSV row of this CU UE ID; columns found by header name. Needs CTRL_CSV=<path>
+# (the controller started with E2E_CSV=<same path>). Values are index - 157 (= UE value), so ctrl = CU - 1.
+CTRL_CSV=${CTRL_CSV:-}
+ctrl_vals() { [[ -n $CTRL_CSV && -r $CTRL_CSV ]] || { echo "-"; return; }
+  awk -F, -v id="$CUID" 'NR == 1 {for (i = 1; i <= NF; i++) c[$i] = i; next}
+    $c["cu_ue_id"] == id {s = $c["srv_rsrp_dbm"]; sp = $c["srv_pci"]; n = $c["nb_rsrp_dbm"]; np = $c["nb_pci"]
+                          nn = $c["n_nb"]; sa = $c["srv_age_ms"]; m += $c["n_meas_cu"]; rows++}
+    END {if (!rows) {print "no row"; exit}
+         if (s == "") {print "no report"; exit}
+         printf "serving %s (PCI %s) ", s, sp
+         if (n != "") printf "neighbour %s (PCI %s) gap %d", n, np, s - n; else printf "no neighbour"
+         printf ", n_nb %s, age %s ms (whole CSV: %d reports, %d rows)", nn, sa, m, rows}' "$CTRL_CSV"; }
 restore() { ctrl loss "$MOVE" "$DU" 10; echo "hub restored: loss $MOVE $DU 10"; }
 
 for f in "$L1" "$L2"; do
@@ -90,6 +104,7 @@ for step in $STEPS; do
     "$(count "$L2" "$n2" ' confirmed (')" "$(count "$L2" "$n2" 'not detected (')" "$(timing "$L2" "$n2")"
   echo "   $MOVE ratio: $(ratios "$LM" "$nm")"
   echo "   $MOVE dBm: UE PHY $(phy_vals "$LM" "$nm") | CU $(cu_vals)"
+  [[ -n $CTRL_CSV ]] && echo "   $MOVE dBm: controller $(ctrl_vals)"
   tail -n +"$nm" "$LM" | grep -E ' confirmed \(| not detected \(' | tail -n 1 | sed "s/^.*\] neighbour/   $MOVE last: neighbour/"
 done
 restore

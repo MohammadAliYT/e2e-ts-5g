@@ -12,13 +12,18 @@ add_executable(e2e_ctrl
   e2/subscribe_du.c
   e2/subscribe_cu.c
   e2/rc_handover.c
+  e2/rc_meas_sub.c
   collect/mac.c
   collect/rlc.c
   collect/kpm_values.c
   collect/kpm_du.c
   collect/kpm_cu.c
+  collect/cu_ue_id.c
+  collect/meas_report_dec.c
+  collect/rc_meas.c
   state/ue_table.c
   state/cu_table.c
+  state/cu_meas.c
   state/median.c
   state/cell_view.c
   state/ue_view.c

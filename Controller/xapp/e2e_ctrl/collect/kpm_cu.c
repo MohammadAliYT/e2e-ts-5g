@@ -1,6 +1,7 @@
 /* collect/kpm_cu.c - CU KPM style 4 reports -> CU table. See kpm_cu.h. */
 #include "collect/kpm_cu.h"
 
+#include "collect/cu_ue_id.h"
 #include "collect/kpm_values.h"
 #include "state/cu_table.h"
 #include "state/ue_table.h"
@@ -14,20 +15,6 @@ static void store(void* ctx, byte_array_t name, double v)
     u->w_pdcp_dl_mbit = v;
   else if (cmp_str_ba("DRB.PdcpSduVolumeUL", name) == 0)
     u->w_pdcp_ul_mbit = v;
-}
-
-/* CU UE ID of a gNB-type UE ID: the F1AP list if present, else RAN UE ID (both = RRC UE ID in OAI) */
-static bool cu_ue_id(gnb_e2sm_t const* g, uint32_t* id)
-{
-  if (g->gnb_cu_ue_f1ap_lst_len > 0 && g->gnb_cu_ue_f1ap_lst != NULL) {
-    *id = g->gnb_cu_ue_f1ap_lst[0];
-    return true;
-  }
-  if (g->ran_ue_id != NULL) {
-    *id = (uint32_t)*g->ran_ue_id;
-    return true;
-  }
-  return false;
 }
 
 void collect_kpm_cu(sm_ag_if_rd_t const* rd)
@@ -46,7 +33,7 @@ void collect_kpm_cu(sm_ag_if_rd_t const* rd)
     meas_report_per_ue_t const* rep = &f3->meas_report_per_ue[i];
     ue_id_e2sm_t const* id = &rep->ue_meas_report_lst;
     uint32_t cu_id;
-    if (id->type != GNB_UE_ID_E2SM || !cu_ue_id(&id->gnb, &cu_id))
+    if (id->type != GNB_UE_ID_E2SM || !cu_ue_id_of(&id->gnb, &cu_id))
       continue;
     cu_ue_t* u = cu_table_get(cu_id);
     if (u == NULL)

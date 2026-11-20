@@ -12,6 +12,7 @@
 #include <stdint.h>
 
 #include "lib/sm/ie/ue_id.h"
+#include "state/cu_meas.h"
 
 typedef struct {
   bool used;
@@ -24,9 +25,13 @@ typedef struct {
   bool has_ue_id;
   ue_id_e2sm_t ue_id;
 
+  /* latest serving + neighbour RSRP from the UE's MeasurementReports (phase 1b, not reset per window) */
+  cu_meas_t meas;
+
   /* ---- current 1 s window ---- */
   uint32_t w_n_kpm;
   double w_pdcp_dl_mbit, w_pdcp_ul_mbit; /* DRB.PdcpSduVolumeDL/UL, whole Mbit per period, last report */
+  uint32_t w_n_meas; /* MeasurementReports in this window */
 } cu_ue_t;
 
 /* Entry for CU UE ID id; created if new. NULL if the table is full. */

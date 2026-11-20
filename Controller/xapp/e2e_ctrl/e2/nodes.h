@@ -19,8 +19,9 @@
 typedef struct {
   e2_node_connected_xapp_t* node; /* points into the node list, valid until free_e2_node_arr_xapp() */
   uint32_t nb_id;
-  bool has_cell;      /* nr_cell_id and nr_cgi are valid */
+  bool has_cell;      /* nr_cell_id, nr_cgi and pci are valid */
   uint64_t nr_cell_id;
+  uint16_t pci;       /* PCI of the DU's cell (MeasurementReports name cells by PCI) */
   uint8_t nr_cgi[NR_CGI_LEN]; /* target cell for an RC handover to this DU */
 } du_info_t;
 

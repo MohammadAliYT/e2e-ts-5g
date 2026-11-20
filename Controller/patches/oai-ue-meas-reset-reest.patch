@@ -1,0 +1,98 @@
+diff --git a/openair2/RRC/NR_UE/rrc_UE.c b/openair2/RRC/NR_UE/rrc_UE.c
+index fe9a182..361734f 100644
+--- a/openair2/RRC/NR_UE/rrc_UE.c
++++ b/openair2/RRC/NR_UE/rrc_UE.c
+@@ -997,6 +997,46 @@ static void nr_ue_meas_reset(meas_t *meas_cell, bool csi_meas)
+     meas_cell->ss_rsrp_dBm.init = false;
+ }
+ 
++/* e2e-ts patch (oai-ue-meas-reset-reest.patch): measurement actions upon handover and re-establishment
++ * (TS 38.331 5.5.6.1), used by both. Before, only the handover cleared the neighbour entries; after a
++ * re-establishment to another cell, the entry of the new serving PCI stayed (the PHY does not measure the
++ * serving PCI, so no INT_MAX came to remove it) and every MeasurementReport carried it as a neighbour.
++ * - clear the L3 neighbour entries (filter state)
++ * - for each measId: stop the time-to-trigger timers (TA2, TA3) and reset reports_sent
++ * - event-triggered measIds: also stop the periodic_report_timer (it repeats the event report)
++ * - periodical measIds (trigger_quantity 0): keep the periodic_report_timer running. OAI starts it only
++ *   from the measConfig (start_periodical_report()), so stopping it here would end periodic reporting;
++ *   reports_sent = 0 makes the UE send one report as soon as the new serving cell is measured (5.5.4.1). */
++static void nr_rrc_meas_actions_upon_ho_reest(rrcPerNB_t *rrcNB)
++{
++  l3_measurements_t *l3m = &rrcNB->l3_measurements;
++  for (int i = 0; i < NUMBER_OF_NEIGHBORING_CELLS_MAX; i++) {
++    nr_ue_meas_reset(&l3m->neighboring_cell[i], false);
++    nr_ue_meas_reset(&l3m->neighboring_cell[i], true);
++  }
++  for (int j = 0; j < NR_MAX_MEAS_ID; j++) {
++    meas_report_params_t *p = &l3m->meas_report[j];
++    nr_timer_stop(&p->TA2);
++    nr_timer_stop(&p->TA3);
++    if (p->trigger_quantity > 0)
++      nr_timer_stop(&p->periodic_report_timer);
++    p->reports_sent = 0;
++  }
++}
++
++/* e2e-ts patch (oai-ue-meas-reset-reest.patch): true if this neighbour entry holds a value and is the serving
++ * cell. Entries without a value are ignored: unused entries keep Nid_cell 0 and cleared entries keep their
++ * old PCI (nr_ue_meas_reset() clears only the init flags), so they would match the serving PCI by chance.
++ * meas_t holds only the PCI, no SSB frequency, so this check is intra-frequency only: with inter-frequency
++ * neighbours it would also drop a cell with the serving PCI on another SSB frequency. */
++static bool is_serving_cell_entry(const l3_measurements_t *l3m, const meas_t *cell)
++{
++  const meas_t *s = &l3m->serving_cell;
++  const bool cell_has_value = cell->ss_rsrp_dBm.init || cell->csi_rsrp_dBm.init;
++  const bool serving_has_value = s->ss_rsrp_dBm.init || s->csi_rsrp_dBm.init;
++  return cell_has_value && serving_has_value && cell->Nid_cell == s->Nid_cell;
++}
++
+ /** @brief Clear the source PCell snapshot, including its keys */
+ static void nr_rrc_clear_ho_source(NR_UE_RRC_INST_t *rrc)
+ {
+@@ -1046,11 +1086,7 @@ static void nr_rrc_process_reconfigurationWithSync(NR_UE_RRC_INST_t *rrc,
+     rrc->ho_source.sib1 = rrcNB->SInfo.sib1;
+     rrcNB->SInfo.sib1 = NULL;
+   }
+-  l3_measurements_t *l3m = &rrcNB->l3_measurements;
+-  for (int i = 0; i < NUMBER_OF_NEIGHBORING_CELLS_MAX; i++) {
+-    nr_ue_meas_reset(&l3m->neighboring_cell[i], false);
+-    nr_ue_meas_reset(&l3m->neighboring_cell[i], true);
+-  }
++  nr_rrc_meas_actions_upon_ho_reest(rrcNB); // e2e-ts patch: same actions as on re-establishment (5.5.6.1)
+ 
+   if (reconfigurationWithSync->spCellConfigCommon) {
+     /* if the frequencyInfoDL is included, consider the target SpCell
+@@ -2852,6 +2888,9 @@ static void nr_rrc_ue_process_rrcReestablishment(NR_UE_RRC_INST_t *rrc,
+   rrcPerNB_t *rrcNB = rrc->perNB + gNB_index;
+   asn1cFreeStruc(asn_DEF_NR_MeasGapConfig, rrcNB->measGapConfig);
+ 
++  // e2e-ts patch: measurement actions upon re-establishment (TS 38.331 5.5.6.1), same as on handover
++  nr_rrc_meas_actions_upon_ho_reest(rrcNB);
++
+   // resetting the RA trigger state after receiving MSG4 with RRCReestablishment
+   rrc->ra_trigger = RA_NOT_RUNNING;
+   // to flag 1st reconfiguration after reestablishment
+@@ -3228,6 +3267,10 @@ static void handle_event_a3(l3_measurements_t *l3_measurements,
+ 
+   for (int i = 0; i < NUMBER_OF_NEIGHBORING_CELLS_MAX; i++) {
+     meas_t *neighboring_cell = &l3_measurements->neighboring_cell[i];
++    if (is_serving_cell_entry(l3_measurements, neighboring_cell)) { // e2e-ts patch: never A3 against itself
++      LOG_W(NR_RRC, "[e2e-ts] neighbour entry %d has the serving PCI %u: ignored for A3\n", i, neighboring_cell->Nid_cell);
++      continue;
++    }
+     int neighboring_cell_rsrp = get_rsrp_value(neighboring_cell);
+ 
+     if (neighboring_cell_rsrp == INT_MAX) {
+@@ -4074,6 +4117,12 @@ void rrc_ue_generate_measurementReport(rrcPerNB_t *rrc, instance_t ue_id, int me
+         is_valid = l3m->neighboring_cell[i].csi_rsrp_dBm.init;
+       }
+ 
++      // e2e-ts patch: never report the serving cell as a neighbour
++      if (is_valid && is_serving_cell_entry(l3m, &l3m->neighboring_cell[i])) {
++        LOG_W(NR_RRC, "[e2e-ts] neighbour entry %d has the serving PCI %u: not reported\n", i, l3m->neighboring_cell[i].Nid_cell);
++        is_valid = false;
++      }
++
+       if (is_valid) {
+         neighbor_pcis[num_neighbors] = l3m->neighboring_cell[i].Nid_cell;
+         int neighbor_rsrp_dBm = rsrp_dBm_value(params->rs_type == NR_NR_RS_Type_ssb ? &l3m->neighboring_cell[i].ss_rsrp_dBm

@@ -1,4 +1,4 @@
-/* e2/f1_setup.c - decode the F1 Setup Request -> NR Cell Identity + NR CGI. See f1_setup.h. */
+/* e2/f1_setup.c - decode the F1 Setup Request -> NR Cell Identity + NR CGI + PCI. See f1_setup.h. */
 #include "e2/f1_setup.h"
 
 #include <stdio.h>
@@ -31,7 +31,7 @@ static bool nr_cgi_bytes(F1AP_NRCGI_t const* c, uint8_t out[NR_CGI_LEN])
 }
 
 /* First served cell in the GNB-DU Served Cells List IE, if any */
-static bool served_cell(F1AP_F1SetupRequest_t const* r, uint64_t* cell_id, uint8_t nr_cgi[NR_CGI_LEN])
+static bool served_cell(F1AP_F1SetupRequest_t const* r, uint64_t* cell_id, uint8_t nr_cgi[NR_CGI_LEN], uint16_t* pci)
 {
   for (int i = 0; i < r->protocolIEs.list.count; i++) {
     F1AP_F1SetupRequestIEs_t const* ie = r->protocolIEs.list.array[i];
@@ -41,14 +41,17 @@ static bool served_cell(F1AP_F1SetupRequest_t const* r, uint64_t* cell_id, uint8
     if (cells->list.count < 1)
       continue;
     F1AP_GNB_DU_Served_Cells_ItemIEs_t const* item = (F1AP_GNB_DU_Served_Cells_ItemIEs_t const*)cells->list.array[0];
-    F1AP_NRCGI_t const* cgi = &item->value.choice.GNB_DU_Served_Cells_Item.served_Cell_Information.nRCGI;
-    if (cell_id_from_bits(&cgi->nRCellIdentity, cell_id) && nr_cgi_bytes(cgi, nr_cgi))
+    F1AP_Served_Cell_Information_t const* info = &item->value.choice.GNB_DU_Served_Cells_Item.served_Cell_Information;
+    F1AP_NRCGI_t const* cgi = &info->nRCGI;
+    if (cell_id_from_bits(&cgi->nRCellIdentity, cell_id) && nr_cgi_bytes(cgi, nr_cgi)) {
+      *pci = (uint16_t)info->nRPCI;
       return true;
+    }
   }
   return false;
 }
 
-bool f1_setup_cell(byte_array_t req, uint64_t* cell_id, uint8_t nr_cgi[NR_CGI_LEN])
+bool f1_setup_cell(byte_array_t req, uint64_t* cell_id, uint8_t nr_cgi[NR_CGI_LEN], uint16_t* pci)
 {
   if (req.buf == NULL || req.len == 0)
     return false;
@@ -60,7 +63,7 @@ bool f1_setup_cell(byte_array_t req, uint64_t* cell_id, uint8_t nr_cgi[NR_CGI_LE
   if (rval.code == RC_OK && pdu->present == F1AP_F1AP_PDU_PR_initiatingMessage
       && pdu->choice.initiatingMessage->procedureCode == F1AP_ProcedureCode_id_F1Setup
       && pdu->choice.initiatingMessage->value.present == F1AP_InitiatingMessage__value_PR_F1SetupRequest) {
-    found = served_cell(&pdu->choice.initiatingMessage->value.choice.F1SetupRequest, cell_id, nr_cgi);
+    found = served_cell(&pdu->choice.initiatingMessage->value.choice.F1SetupRequest, cell_id, nr_cgi, pci);
   } else {
     fprintf(stderr, "[e2e_ctrl] F1 component config does not decode as F1 Setup Request\n");
   }

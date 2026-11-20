@@ -32,7 +32,7 @@ static void read_cell_id(du_info_t* d)
   e2_node_connected_xapp_t const* n = d->node;
   for (size_t j = 0; j < n->len_cca && !d->has_cell; j++)
     if (n->cca[j].e2_node_comp_interface_type == F1_E2AP_NODE_COMP_INTERFACE_TYPE)
-      d->has_cell = f1_setup_cell(n->cca[j].e2_node_comp_conf.request, &d->nr_cell_id, d->nr_cgi);
+      d->has_cell = f1_setup_cell(n->cca[j].e2_node_comp_conf.request, &d->nr_cell_id, d->nr_cgi, &d->pci);
 }
 
 /* Sort one node into ran: DU, CU, or ignored */
@@ -73,7 +73,8 @@ void nodes_find(e2_node_arr_xapp_t* nodes, ran_nodes_t* ran)
     du_info_t* d = &ran->du[di];
     read_cell_id(d);
     if (d->has_cell)
-      printf("[e2e_ctrl] DU%zu = nb_id %u (0x%x), NR cell ID %" PRIu64 "\n", di + 1, d->nb_id, d->nb_id, d->nr_cell_id);
+      printf("[e2e_ctrl] DU%zu = nb_id %u (0x%x), NR cell ID %" PRIu64 ", PCI %u\n", di + 1, d->nb_id, d->nb_id, d->nr_cell_id,
+             d->pci);
     else
       printf("[e2e_ctrl] DU%zu = nb_id %u (0x%x), NR cell ID unknown (no F1 Setup in component config)\n", di + 1, d->nb_id, d->nb_id);
   }

@@ -63,6 +63,14 @@ if [[ ${1:-} != --no-start ]]; then
   sleep 5
 fi
 
+# Pre-flight (before the first loss change): ho-ctrl.sh needs the running controller. Without it no
+# handover is sent, and the test drives each UE into link failure and re-establishment (20 Nov 19:05).
+if [[ $(basename "${HO_TOOL:-ho.sh}") == ho-ctrl.sh ]]; then
+  fifo=${E2E_CMD:-/tmp/e2e_ctrl.cmd}
+  pgrep -x e2e_ctrl >/dev/null || { echo "HO_TOOL=ho-ctrl.sh but e2e_ctrl is not running - start the controller first"; exit 1; }
+  [[ -p $fifo ]] || { echo "e2e_ctrl runs, but its command FIFO $fifo is missing - no test"; exit 1; }
+fi
+
 echo "# $(date -Is) hub handover test" | tee -a "$log"
 echo "start: ue1 on $(serving 1), ue2 on $(serving 2)" | tee -a "$log"
 printf '%-4s %-10s %-6s %-9s %-9s %-6s %-6s %s\n' \

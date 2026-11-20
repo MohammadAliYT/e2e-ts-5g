@@ -62,5 +62,6 @@ void cu_table_new_window(int64_t now_us)
     }
     u->w_n_kpm = 0;
     u->w_pdcp_dl_mbit = u->w_pdcp_ul_mbit = 0;
+    u->w_n_meas = 0;
   }
 }

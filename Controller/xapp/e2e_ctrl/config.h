@@ -61,4 +61,20 @@ enum { MAX_DU = 4, MAX_UE = 32 };
 /* A handover is "NOT confirmed" when the UE view does not show the target DU after this long */
 #define HO_CONFIRM_S 10
 
+/* ---- phase 1b: RRC measurements (RC REPORT style 1 = a copy of every UE MeasurementReport) ---- */
+/* E2SM-RC REPORT style 1 "Message Copy"; RAN parameters 3 "RRC Message" and 4 "UE ID" (rc_data_ie.h).
+ * The CU adds the UE ID only with Controller/patches/oai-cu-rc-msg-copy-ueid.patch. */
+enum { RC_REPORT_STYLE_MSG_COPY = 1 };
+/* UL-DCCH message ID of a MeasurementReport: the CU compares c1->present (rrc_gNB.c:2391), i.e.
+ * NR_UL_DCCH_MessageType__c1_PR_measurementReport (checked by a static assert in collect/meas_report_dec.c) */
+enum { RRC_MSG_ID_MEAS_REPORT = 1 };
+/* Event Trigger Condition ID of that trigger (any value; the CU sends it back in the indication header) */
+enum { RC_MEAS_COND_ID = 1 };
+/* Neighbours kept per UE, strongest first; the CSV shows the strongest */
+enum { MAX_NB = 4 };
+/* RSRP-Range index n -> dBm: -157 + n <= RSRP < -156 + n, so dBm = n - 157 is the lower edge of the
+ * 1 dB bin = the UE's value (oai-ue-rrc-rsrp-report.patch: index = RSRP + 157).
+ * The CU's nrRRC_stats.log prints n - 156 (upper edge), i.e. 1 dB more. */
+#define RSRP_INDEX_TO_DBM 157
+
 #endif

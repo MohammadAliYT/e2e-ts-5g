@@ -13,7 +13,9 @@ static const char CSV_HEADER[] =
     /* phase 1a */
     "rlc_delay_dl_us,amf_ue_ngap_id,cu_pdcp_dl_mbit,cu_pdcp_ul_mbit,n_kpm_cu,"
     /* phase 1a, DL queue (RLC SM, DRB 1) */
-    "dl_hol_us_mean,dl_hol_us_max,dl_buf_bytes_mean,dl_buf_bytes_max\n";
+    "dl_hol_us_mean,dl_hol_us_max,dl_buf_bytes_mean,dl_buf_bytes_max,"
+    /* phase 1b, UE MeasurementReports via the CU (RC REPORT style 1); SSB RSRP in dBm = index - 157 */
+    "srv_pci,srv_rsrp_dbm,srv_age_ms,nb_pci,nb_rsrp_dbm,nb_age_ms,n_nb,n_meas_cu\n";
 
 /* ",value" or just "," when the value is missing */
 static void num(FILE* f, double v, bool valid, const char* fmt)
@@ -24,6 +26,34 @@ static void num(FILE* f, double v, bool valid, const char* fmt)
 }
 
 static double mbps(uint64_t bytes, int64_t dt_us) { return dt_us > 0 ? (double)bytes * 8.0 / (double)dt_us : NAN; }
+
+/* Age in ms at the end of window t_s of a value set at t_us (0 if it came after the window end) */
+static int64_t age_ms(int64_t t_s, int64_t t_us)
+{
+  int64_t const a = (t_s * 1000000 - t_us) / 1000;
+  return a > 0 ? a : 0;
+}
+
+/* Phase 1b columns. No report yet: all empty, n_meas_cu 0. Last report without neighbour:
+ * nb_pci and nb_rsrp_dbm empty, n_nb 0, nb_age_ms = age of that report. */
+static void meas_cols(FILE* f, int64_t t_s, cu_ue_t const* cu)
+{
+  cu_meas_t const* m = cu != NULL ? &cu->meas : NULL;
+  if (m != NULL && m->has_srv)
+    fprintf(f, ",%u,%d,%" PRId64, m->srv.pci, m->srv.rsrp_dbm, age_ms(t_s, m->srv_t_us));
+  else
+    fputs(",,,", f);
+  if (m != NULL && m->nb_known) {
+    if (m->n_nb > 0)
+      fprintf(f, ",%u,%d", m->nb[0].pci, m->nb[0].rsrp_dbm);
+    else
+      fputs(",,", f);
+    fprintf(f, ",%" PRId64 ",%zu", age_ms(t_s, m->nb_t_us), m->n_nb);
+  } else {
+    fputs(",,,,", f);
+  }
+  fprintf(f, ",%u", cu != NULL ? cu->w_n_meas : 0u);
+}
 
 void csv_row_header(FILE* f) { fputs(CSV_HEADER, f); }
 
@@ -71,6 +101,8 @@ void csv_row_write(FILE* f, int64_t t_s, int64_t t_rel, size_t du_no, du_info_t 
   num(f, (double)u->w_dl_hol_us_max, q, "%.0f");
   num(f, q ? u->w_dl_buf_bytes_sum / u->w_n_q : NAN, q, "%.0f");
   num(f, (double)u->w_dl_buf_bytes_max, q, "%.0f");
+
+  meas_cols(f, t_s, cu);
   fputc('\n', f);
 }
 
@@ -87,5 +119,12 @@ void csv_row_status(int64_t t_rel, size_t du_no, ue_t const* u, cu_ue_t const* c
             u->w_dl_buf_bytes_sum / u->w_n_q);
   if (cu != NULL && cu->w_n_kpm > 0)
     fprintf(stderr, " cu_pdcp=%.0f/%.0f Mbit", cu->w_pdcp_dl_mbit, cu->w_pdcp_ul_mbit);
+  if (cu != NULL && cu->meas.has_srv) {
+    fprintf(stderr, " rsrp=%d(pci%u)", cu->meas.srv.rsrp_dbm, cu->meas.srv.pci);
+    if (cu->meas.n_nb > 0)
+      fprintf(stderr, "/%d(pci%u)", cu->meas.nb[0].rsrp_dbm, cu->meas.nb[0].pci);
+    else
+      fputs("/none", stderr);
+  }
   fputc('\n', stderr);
 }
