@@ -53,6 +53,7 @@ void collect_kpm_cu(sm_ag_if_rd_t const* rd)
       continue;
     u->last_seen_us = now;
     u->amf_ue_ngap_id = id->gnb.amf_ue_ngap_id;
+    cu_table_set_ue_id(u, id);
     kpm_values_for_each(&rep->ind_msg_format_1, store, u);
     u->w_n_kpm++;
   }

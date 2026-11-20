@@ -11,6 +11,7 @@ add_executable(e2e_ctrl
   e2/kpm_sub.c
   e2/subscribe_du.c
   e2/subscribe_cu.c
+  e2/rc_handover.c
   collect/mac.c
   collect/rlc.c
   collect/kpm_values.c
@@ -18,8 +19,15 @@ add_executable(e2e_ctrl
   collect/kpm_cu.c
   state/ue_table.c
   state/cu_table.c
+  state/median.c
+  state/cell_view.c
+  state/ue_view.c
+  act/cmd_fifo.c
+  act/act.c
+  loop/tick.c
   output/csv.c
   output/csv_row.c
+  output/state_csv.c
   )
 
 # lets every module include "config.h", "e2/nodes.h", ... from this folder

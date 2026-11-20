@@ -41,4 +41,24 @@ enum { MAX_DU = 4, MAX_UE = 32 };
 /* CSV output: path from this environment variable, else e2e_ctrl_<date>_<time>.csv */
 #define CSV_PATH_ENV "E2E_CSV"
 
+/* ---- phase 2: state ---- */
+/* Medians use the last MED_WINDOWS windows (1 s each) */
+#define MED_WINDOWS 5
+/* A UE has traffic in a window when RLC DL + UL >= ACTIVE_MBPS (Mbit/s).
+ * 0.1 Mbit/s: a ping every second (~0.001 Mbit/s) is idle; iperf3 at 1 Mbit/s is active. */
+#define ACTIVE_MBPS 0.1
+/* An active UE becomes idle after IDLE_WINDOWS windows in a row without traffic */
+#define IDLE_WINDOWS 3
+/* State CSV: path from this environment variable, else the main CSV path with "_state" */
+#define STATE_CSV_PATH_ENV "E2E_STATE_CSV"
+
+/* ---- phase 3: act on command ---- */
+/* Command FIFO: path from this environment variable, else CMD_FIFO_DEFAULT */
+#define CMD_FIFO_ENV "E2E_CMD"
+#define CMD_FIFO_DEFAULT "/tmp/e2e_ctrl.cmd"
+/* No new handover request for a UE until this long after the last one (no ping-pong) */
+#define HO_COOLDOWN_S 5
+/* A handover is "NOT confirmed" when the UE view does not show the target DU after this long */
+#define HO_CONFIRM_S 10
+
 #endif

@@ -9,6 +9,8 @@
 #      source 10 dB weaker; check serving DU and ping
 # PASS = UE in-sync on the target DU only, ping loss <= 20 %, no re-establishment (no bounce).
 # Usage: tools/hub-ho-test.sh [--no-start]      (--no-start: lab already up in hub mode, 2 UEs)
+# HO_TOOL=<script>: handover tool with the interface of tools/ho.sh (default tools/ho.sh);
+#   HO_TOOL=tools/ho-ctrl.sh sends the handover through the running controller (phase 3).
 set -uo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 source "$root/RAN/interfaces/lab.env"
@@ -40,7 +42,7 @@ ho_test() { # <ue number> <CU UE ID> <from DU> <to DU>
   s0=$(serving "$id")
   if [[ $s0 == "du$a" ]]; then
     t0=$(date +%s.%N)
-    "$root/tools/ho.sh" "$id" >>"$log" 2>&1
+    "${HO_TOOL:-$root/tools/ho.sh}" "$id" >>"$log" 2>&1
     t1=$(date +%s.%N)
     ho_s=$(awk -v a="$t0" -v b="$t1" 'BEGIN { printf "%.1f", b - a }')
   else

@@ -13,13 +13,15 @@
 #include <stdint.h>
 
 #include "config.h"
+#include "e2/f1_setup.h"
 #include "xApp/e42_xapp_api.h"
 
 typedef struct {
   e2_node_connected_xapp_t* node; /* points into the node list, valid until free_e2_node_arr_xapp() */
   uint32_t nb_id;
-  bool has_cell;
+  bool has_cell;      /* nr_cell_id and nr_cgi are valid */
   uint64_t nr_cell_id;
+  uint8_t nr_cgi[NR_CGI_LEN]; /* target cell for an RC handover to this DU */
 } du_info_t;
 
 typedef struct {

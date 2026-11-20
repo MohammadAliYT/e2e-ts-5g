@@ -32,7 +32,7 @@ static void read_cell_id(du_info_t* d)
   e2_node_connected_xapp_t const* n = d->node;
   for (size_t j = 0; j < n->len_cca && !d->has_cell; j++)
     if (n->cca[j].e2_node_comp_interface_type == F1_E2AP_NODE_COMP_INTERFACE_TYPE)
-      d->has_cell = f1_setup_cell_id(n->cca[j].e2_node_comp_conf.request, &d->nr_cell_id);
+      d->has_cell = f1_setup_cell(n->cca[j].e2_node_comp_conf.request, &d->nr_cell_id, d->nr_cgi);
 }
 
 /* Sort one node into ran: DU, CU, or ignored */

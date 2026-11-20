@@ -11,14 +11,9 @@
 #include <stdio.h>
 
 #include "e2/nodes.h"
+#include "state/cell_view.h" /* cell_window_t */
 #include "state/cu_table.h"
 #include "state/ue_table.h"
-
-/* Cell-level values of one DU in this window */
-typedef struct {
-  double prb_dl, prb_ul; /* sum of the UEs' KPM PRB values */
-  bool valid;            /* at least one UE had KPM in this window */
-} cell_window_t;
 
 void csv_row_header(FILE* f);
 
