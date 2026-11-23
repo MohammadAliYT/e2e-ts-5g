@@ -1,0 +1,354 @@
+--- /dev/null
++++ b/openair1/PHY/NR_UE_TRANSPORT/nr_ue_ssb_cancel.h
+@@ -0,0 +1,44 @@
++/* e2e-ts patch (oai-ue-ho-ssb-cancel.patch): remove the SSB of the serving cell before the PBCH decode
++ * of the target cell in a handover sync. Use case: both cells use the same frequency and send their
++ * SSB at the same time (synchronous TDD). Design: thesis project doc ue-ssb-cancel-design.md. */
++#ifndef NR_UE_SSB_CANCEL_H
++#define NR_UE_SSB_CANCEL_H
++
++#include <stdbool.h>
++#include "PHY/defs_nr_UE.h"
++#include "PHY/NR_REFSIG/ss_pbch_nr.h" // NR_N_SYMBOLS_SSB
++
++/* Result of one cancellation, for the log line */
++typedef struct {
++  bool serving_decoded; // the PBCH of the serving cell passed the CRC check
++  double explained; // part of the received power on PBCH symbols 1 and 3 that the rebuilt serving SSB explains (0..1)
++  double removed_dB; // power on PBCH symbols 1..3 before / after the subtraction, in dB
++} nr_ssb_cancel_result_t;
++
++/* Decode the serving PBCH in the SSB symbols in[], rebuild the serving SSB (PSS, SSS, PBCH DM-RS, PBCH),
++ * estimate its channel and subtract it. Write the result to out[].
++ * Return false if the serving PBCH does not decode or the rebuilt SSB does not explain the received
++ * signal. Then do not use out[]. */
++bool nr_ue_ssb_cancel_serving(const UE_nr_rxtx_proc_t *proc,
++                              const NR_DL_FRAME_PARMS *fp,
++                              int serving_pci,
++                              int ssb_start_sc,
++                              const c16_t in[NR_N_SYMBOLS_SSB][fp->nb_antennas_rx][fp->ofdm_symbol_size],
++                              c16_t out[NR_N_SYMBOLS_SSB][fp->nb_antennas_rx][fp->ofdm_symbol_size],
++                              nr_ssb_cancel_result_t *res);
++
++/* Context of nr_ue_ssb_cancel_hook() */
++typedef struct {
++  const UE_nr_rxtx_proc_t *proc;
++  const NR_DL_FRAME_PARMS *fp;
++  int serving_pci;
++  int ssb_start_sc;
++  bool tried; // the hook ran
++  bool used; // the serving SSB was removed from rxdataF
++  nr_ssb_cancel_result_t res;
++} nr_ssb_cancel_ctx_t;
++
++/* Hook for nr_ssb_search_params_t.pre_sss: remove the serving SSB from rxdataF in place, before the SSS detection.
++ * rxdataF: c16_t [NR_N_SYMBOLS_SSB][fp->nb_antennas_rx][fp->ofdm_symbol_size]. ctx: nr_ssb_cancel_ctx_t. */
++void nr_ue_ssb_cancel_hook(void *ctx, void *rxdataF);
++#endif
+\ No newline at end of file
+--- /dev/null
++++ b/openair1/PHY/NR_UE_TRANSPORT/nr_ue_ssb_cancel.c
+@@ -0,0 +1,207 @@
++/* e2e-ts patch (oai-ue-ho-ssb-cancel.patch): serving-cell SSB cancellation for the handover sync.
++ * See nr_ue_ssb_cancel.h. */
++#include "nr_ue_ssb_cancel.h"
++
++#include <math.h>
++#include <pthread.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include "PHY/NR_TRANSPORT/nr_transport_proto.h" // gNB SSB generators (library PHY_NR)
++#include "PHY/NR_UE_TRANSPORT/nr_transport_proto_ue.h" // nr_pbch_detection()
++#include "PHY/NR_REFSIG/nr_refsig.h" // nr_gold_pbch()
++#include "common/utils/LOG/log.h"
++#include "assertions.h"
++
++#define SSB_CANCEL_AMP 1024 // amplitude of the rebuilt SSB; the channel estimate absorbs the scale
++#define SSB_CANCEL_HALF_WIN 7 // channel estimate: mean over 2 x 7 + 1 subcarriers (as known_pci_cancel_serving())
++#define SSB_CANCEL_MIN_EXPLAINED 0.25 // below this, the rebuilt SSB does not match: do not use the result
++#define SSB_NB_SC 240 // subcarriers of one SSB (TS 38.211 clause 7.4.3.1)
++
++/* nr_generate_pbch() reads only nr_pbch_interleaver and TX_AMP from the gNB structure */
++static PHY_VARS_gNB *g_gnb_stub;
++static pthread_once_t g_gnb_stub_once = PTHREAD_ONCE_INIT;
++
++static void init_gnb_stub(void)
++{
++  g_gnb_stub = calloc(1, sizeof(*g_gnb_stub));
++  AssertFatal(g_gnb_stub != NULL, "e2e-ts ssb-cancel: no memory for the gNB stub\n");
++  nr_init_pbch_interleaver(g_gnb_stub->nr_pbch_interleaver);
++  g_gnb_stub->TX_AMP = SSB_CANCEL_AMP;
++}
++
++static inline int16_t clip16(double v)
++{
++  return v > INT16_MAX ? INT16_MAX : (v < INT16_MIN ? INT16_MIN : (int16_t)lround(v));
++}
++
++/* Rebuild the serving SSB in ref[] (4 symbols x ofdm_symbol_size, same subcarrier order as rxdataF).
++ * Uses the gNB generators with the content of the decoded serving PBCH. */
++static void rebuild_serving_ssb(const NR_DL_FRAME_PARMS *fp_in,
++                                int pci,
++                                int ssb_start_sc,
++                                int n_hf,
++                                int ssb_index,
++                                const fapiPbch_t *pbch,
++                                c16_t *ref)
++{
++  NR_DL_FRAME_PARMS fp = *fp_in;
++  fp.ssb_start_subcarrier = ssb_start_sc;
++  fp.Nid_cell = pci;
++
++  nfapi_nr_config_request_scf_t cfg;
++  memset(&cfg, 0, sizeof(cfg));
++  cfg.cell_config.phy_cell_id.value = pci;
++  // bit 5 of the extra byte is the MSB of k_SSB (nr_pbch_extra_byte_generation())
++  cfg.ssb_table.ssb_subcarrier_offset.value = ((pbch->xtra_byte >> 5) & 1) << 4;
++
++  nfapi_nr_dl_tti_ssb_pdu pdu;
++  memset(&pdu, 0, sizeof(pdu));
++  pdu.ssb_pdu_rel15.SsbBlockIndex = ssb_index;
++  // byte i of bchPayload = decoded_output[i] (pbchsim.c payload check)
++  pdu.ssb_pdu_rel15.bchPayload =
++      pbch->decoded_output[0] | (pbch->decoded_output[1] << 8) | (pbch->decoded_output[2] << 16);
++
++  // the 4 LSBs of the SFN are in bits 0..3 of the extra byte, in reverse order (nr_pbch_extra_byte_generation())
++  int sfn = 0;
++  for (int i = 0; i < 4; i++)
++    sfn |= ((pbch->xtra_byte >> i) & 1) << (3 - i);
++
++  memset(ref, 0, sizeof(*ref) * NR_N_SYMBOLS_SSB * fp.ofdm_symbol_size);
++  nr_generate_pss(ref, SSB_CANCEL_AMP, 0, &cfg, &fp);
++  nr_generate_sss(ref, SSB_CANCEL_AMP, 0, pci, &fp);
++  const int gold_hf = fp.Lmax == 4 ? n_hf : 0; // same rule as nr_common_signal_procedures()
++  nr_generate_pbch_dmrs(nr_gold_pbch(fp.Lmax, pci, gold_hf, ssb_index & 7), ref, SSB_CANCEL_AMP, 0, &cfg, &fp);
++  nr_generate_pbch(g_gnb_stub, &pdu, ref, 0, n_hf, sfn, &cfg, &fp);
++}
++
++/* Channel of the serving cell per SSB subcarrier, from PBCH symbols 1 and 3 (the PBCH and its DM-RS use
++ * all 240 subcarriers there): z = r conj(x) / |x|^2, mean of both symbols, timing ramp removed, mean over
++ * 2 x SSB_CANCEL_HALF_WIN + 1 subcarriers. The target signal is not correlated with x, so the mean
++ * suppresses it. Then out = in - h x on all SSB symbols. */
++static void estimate_and_subtract(const NR_DL_FRAME_PARMS *fp,
++                                  int ssb_start_sc,
++                                  const c16_t *ref,
++                                  const c16_t in[NR_N_SYMBOLS_SSB][fp->nb_antennas_rx][fp->ofdm_symbol_size],
++                                  c16_t out[NR_N_SYMBOLS_SSB][fp->nb_antennas_rx][fp->ofdm_symbol_size],
++                                  nr_ssb_cancel_result_t *res)
++{
++  const int N = fp->ofdm_symbol_size;
++  double p_in = 0, p_out = 0; // power on symbols 1..3 before and after the subtraction
++  double p_in13 = 0, p_out13 = 0; // the same on symbols 1 and 3
++  memcpy(out, in, sizeof(c16_t) * NR_N_SYMBOLS_SSB * fp->nb_antennas_rx * N);
++
++  for (int aarx = 0; aarx < fp->nb_antennas_rx; aarx++) {
++    double ur[SSB_NB_SC], ui[SSB_NB_SC];
++    for (int k = 0; k < SSB_NB_SC; k++) {
++      ur[k] = ui[k] = 0;
++      int n = 0;
++      for (int l = 1; l <= 3; l += 2) {
++        const c16_t x = ref[l * N + ssb_start_sc + k];
++        const c16_t r = in[l][aarx][ssb_start_sc + k];
++        const double px = (double)x.r * x.r + (double)x.i * x.i;
++        if (px == 0)
++          continue;
++        ur[k] += ((double)r.r * x.r + (double)r.i * x.i) / px;
++        ui[k] += ((double)r.i * x.r - (double)r.r * x.i) / px;
++        n++;
++      }
++      if (n > 0) {
++        ur[k] /= n;
++        ui[k] /= n;
++      }
++    }
++
++    // phase step per subcarrier (timing offset): a = arg(sum u[k] conj(u[k-1]))
++    double cr = 0, ci = 0;
++    for (int k = 1; k < SSB_NB_SC; k++) {
++      cr += ur[k] * ur[k - 1] + ui[k] * ui[k - 1];
++      ci += ui[k] * ur[k - 1] - ur[k] * ui[k - 1];
++    }
++    const double a = atan2(ci, cr);
++    double vr[SSB_NB_SC], vi[SSB_NB_SC];
++    for (int k = 0; k < SSB_NB_SC; k++) { // remove the ramp: v = u exp(-j a k)
++      const double c = cos(a * k), s = sin(a * k);
++      vr[k] = ur[k] * c + ui[k] * s;
++      vi[k] = ui[k] * c - ur[k] * s;
++    }
++
++    double hr[SSB_NB_SC], hi[SSB_NB_SC];
++    for (int k = 0; k < SSB_NB_SC; k++) { // mean, then put the ramp back: h = mean(v) exp(j a k)
++      const int lo = k - SSB_CANCEL_HALF_WIN < 0 ? 0 : k - SSB_CANCEL_HALF_WIN;
++      const int up = k + SSB_CANCEL_HALF_WIN > SSB_NB_SC - 1 ? SSB_NB_SC - 1 : k + SSB_CANCEL_HALF_WIN;
++      double mr = 0, mi = 0;
++      for (int j = lo; j <= up; j++) {
++        mr += vr[j];
++        mi += vi[j];
++      }
++      mr /= up - lo + 1;
++      mi /= up - lo + 1;
++      const double c = cos(a * k), s = sin(a * k);
++      hr[k] = mr * c - mi * s;
++      hi[k] = mi * c + mr * s;
++    }
++
++    for (int l = 0; l < NR_N_SYMBOLS_SSB; l++) {
++      for (int k = 0; k < SSB_NB_SC; k++) {
++        const int idx = ssb_start_sc + k;
++        const c16_t x = ref[l * N + idx];
++        const c16_t r = in[l][aarx][idx];
++        if (x.r != 0 || x.i != 0) {
++          const double er = hr[k] * x.r - hi[k] * x.i, ei = hr[k] * x.i + hi[k] * x.r;
++          out[l][aarx][idx] = (c16_t){.r = clip16(r.r - er), .i = clip16(r.i - ei)};
++        }
++        if (l == 0)
++          continue;
++        const c16_t o = out[l][aarx][idx];
++        const double pr = (double)r.r * r.r + (double)r.i * r.i, po = (double)o.r * o.r + (double)o.i * o.i;
++        p_in += pr;
++        p_out += po;
++        if (l != 2) {
++          p_in13 += pr;
++          p_out13 += po;
++        }
++      }
++    }
++  }
++  res->explained = p_in13 > 0 ? 1 - p_out13 / p_in13 : 0;
++  res->removed_dB = p_out > 0 ? 10 * log10(p_in / p_out) : 0;
++}
++
++bool nr_ue_ssb_cancel_serving(const UE_nr_rxtx_proc_t *proc,
++                              const NR_DL_FRAME_PARMS *fp,
++                              int serving_pci,
++                              int ssb_start_sc,
++                              const c16_t in[NR_N_SYMBOLS_SSB][fp->nb_antennas_rx][fp->ofdm_symbol_size],
++                              c16_t out[NR_N_SYMBOLS_SSB][fp->nb_antennas_rx][fp->ofdm_symbol_size],
++                              nr_ssb_cancel_result_t *res)
++{
++  pthread_once(&g_gnb_stub_once, init_gnb_stub);
++  *res = (nr_ssb_cancel_result_t){0};
++
++  int n_hf = 0, ssb_index = 0, symbol_offset = 0;
++  fapiPbch_t pbch;
++  memset(&pbch, 0, sizeof(pbch));
++  res->serving_decoded =
++      nr_pbch_detection(proc, fp, serving_pci, 1, ssb_start_sc, &n_hf, &ssb_index, &symbol_offset, &pbch, in);
++  if (!res->serving_decoded)
++    return false;
++
++  __attribute__((aligned(32))) c16_t ref[NR_N_SYMBOLS_SSB * fp->ofdm_symbol_size];
++  rebuild_serving_ssb(fp, serving_pci, ssb_start_sc, n_hf, ssb_index, &pbch, ref);
++  estimate_and_subtract(fp, ssb_start_sc, ref, in, out, res);
++  return res->explained >= SSB_CANCEL_MIN_EXPLAINED;
++}
++
++
++void nr_ue_ssb_cancel_hook(void *ctx, void *rxdataF)
++{
++  nr_ssb_cancel_ctx_t *c = ctx;
++  const NR_DL_FRAME_PARMS *fp = c->fp;
++  c16_t(*rxF)[fp->nb_antennas_rx][fp->ofdm_symbol_size] = rxdataF;
++  __attribute__((aligned(32))) c16_t clean[NR_N_SYMBOLS_SSB][fp->nb_antennas_rx][fp->ofdm_symbol_size];
++  c->tried = true;
++  c->used = nr_ue_ssb_cancel_serving(c->proc, fp, c->serving_pci, c->ssb_start_sc, rxF, clean, &c->res);
++  if (c->used)
++    memcpy(rxF, clean, sizeof(clean));
++}
+\ No newline at end of file
+--- a/openair1/PHY/defs_nr_UE.h
++++ b/openair1/PHY/defs_nr_UE.h
+@@ -589,6 +589,10 @@
+   bool fo_flag; // frequency offset estimation flag for pss_synchro_nr()
+   void *rxdataF; // Pre-allocated rxdataF buffer
+   void *pssTime; // Pre-generated PSS time sequences
++  // e2e-ts patch (oai-ue-ho-ssb-cancel.patch): called after the FFT of the SSB symbols and before the SSS detection.
++  // It can change rxdataF. NULL (all callers that do not set it): no call.
++  void (*pre_sss)(void *ctx, void *rxdataF);
++  void *pre_sss_ctx;
+   // Output parameters
+   pss_detection_result_t pss_res;
+   sss_detection_result_t sss_res;
+--- a/openair1/PHY/NR_UE_TRANSPORT/nr_initial_sync.c
++++ b/openair1/PHY/NR_UE_TRANSPORT/nr_initial_sync.c
+@@ -21,6 +21,7 @@
+ #include "PHY/TOOLS/tools_defs.h"
+ #include "nr-uesoftmodem.h"
+ #include "nfapi/open-nFAPI/nfapi/public_inc/fapi_nr_ue_interface.h"
++#include "nr_ue_ssb_cancel.h"
+ 
+ //#define DEBUG_INITIAL_SYNCH
+ #define DUMP_PBCH_CH_ESTIMATES 0
+@@ -257,6 +258,8 @@
+     // Extract SSB symbols to frequency domain
+     // Symbol ordering: 0=PSS, 1=PBCH, 2=SSS, 3=PBCH
+     do_time_to_freq(params, ssb_time_offset);
++    if (params->pre_sss) // e2e-ts patch (oai-ue-ho-ssb-cancel.patch): handover sync, remove the serving SSB first
++      params->pre_sss(params->pre_sss_ctx, params->rxdataF);
+ 
+     // Perform SSS detection
+     nr_sss_params_t p_sss = (nr_sss_params_t){.nb_antennas_rx = params->nb_antennas_rx,
+@@ -269,7 +272,9 @@
+ 
+     c16_t(*rxdataF)[params->nb_antennas_rx][params->ofdm_symbol_size] =
+         (c16_t(*)[params->nb_antennas_rx][params->ofdm_symbol_size])params->rxdataF;
+-    params->sss_res = rx_sss_nr(&p_sss, pss_res, -1, rxdataF);
++    // e2e-ts patch (oai-ue-ho-ssb-cancel.patch): limit the SSS search to the known target PCI, as the PSS search does.
++    // In a handover the target PCI comes from reconfigurationWithSync (TS 38.331). With -1 nothing changes.
++    params->sss_res = rx_sss_nr(&p_sss, pss_res, params->target_nid_cell, rxdataF);
+ 
+     if (!params->sss_res.success || params->sss_res.nid_cell < 0) {
+       continue;
+@@ -313,6 +318,13 @@
+   if (ssbInfo->freqOffset)
+     compensate_freq_offset(rxdata, fp->nb_antennas_rx, ssbInfo->rxdata_sz, ssbInfo->freqOffset, fp->samples_per_subframe * 1000);
+ 
++  // e2e-ts patch (oai-ue-ho-ssb-cancel.patch): in a handover sync to another PCI, remove the serving SSB after the FFT,
++  // before the SSS and PBCH detection. fp->Nid_cell is still the serving PCI: it changes only after a successful sync.
++  const bool try_cancel = ssbInfo->targetNidCell >= 0 && fp->Nid_cell != ssbInfo->targetNidCell;
++  nr_ssb_cancel_ctx_t cancel_ctx = {.proc = ssbInfo->proc,
++                                    .fp = fp,
++                                    .serving_pci = fp->Nid_cell,
++                                    .ssb_start_sc = ssbInfo->gscnInfo.ssbFirstSC};
+   nr_ssb_search_params_t search_params = {
+       .dl_CarrierFreq = fp->dl_CarrierFreq,
+       .sampling_rate = fp->samples_per_subframe * 1000,
+@@ -338,6 +350,8 @@
+       .fo_flag = ssbInfo->foFlag,
+       .rxdataF = rxdataF,
+       .pssTime = pssTime,
++      .pre_sss = try_cancel ? nr_ue_ssb_cancel_hook : NULL,
++      .pre_sss_ctx = &cancel_ctx,
+   };
+ 
+   ssbInfo->syncRes.cell_detected = nr_search_ssb_common(&search_params);
+@@ -376,6 +390,18 @@
+       LOG_I(PHY, "pbch rx ok. rsrp:%d dB/RE, adjust_rxgain:%d dB\n", rsrp_db_per_re, ssbInfo->adjust_rxgain);
+     }
+   }
++  if (try_cancel) // e2e-ts patch (oai-ue-ho-ssb-cancel.patch)
++    LOG_I(PHY,
++          "[e2e-ts ssb-cancel] target PCI %d, SSS PCI %d, tried %d; serving PCI %d: decoded %d, explained %.2f, removed %.1f dB, used %d; PBCH %s\n",
++          ssbInfo->targetNidCell,
++          search_params.sss_res.success ? ssbInfo->nidCell : -1,
++          cancel_ctx.tried,
++          cancel_ctx.serving_pci,
++          cancel_ctx.res.serving_decoded,
++          cancel_ctx.res.explained,
++          cancel_ctx.res.removed_dB,
++          cancel_ctx.used,
++          ssbInfo->syncRes.cell_detected ? "decoded" : "not decoded");
+   completed_task_ans(ssbInfo->ans);
+ }
+ 
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -966,6 +966,7 @@
+   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/sss_nr.c
+   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/cic_filter_nr.c
+   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_initial_sync.c
++  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_ue_ssb_cancel.c
+   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_initial_sync_sl.c
+   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_ntn_l1.c
+   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_ue_rf_helpers.c

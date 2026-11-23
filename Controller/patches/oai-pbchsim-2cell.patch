@@ -1,0 +1,161 @@
+--- a/openair1/SIMULATION/NR_PHY/pbchsim.c
++++ b/openair1/SIMULATION/NR_PHY/pbchsim.c
+@@ -85,6 +85,11 @@
+   int ret_test = 1;
+   uint8_t transmission_mode = 1,n_tx=1,n_rx=1;
+   uint16_t Nid_cell=0;
++  int intf_nid_cell = -1; // e2e-ts patch: PCI of a second cell (-Q); -1: one cell only
++  double intf_gain_dB = 0; // e2e-ts patch: power of the second cell relative to the -N cell in dB (-T)
++  int intf_frame = -1; // e2e-ts patch: frame number (SFN) of the second cell (-J); -1: same as the first cell
++  int intf_delay = 0; // e2e-ts patch: delay of the second cell in samples (-D)
++  int ho_mode = 0; // e2e-ts patch (-H): 0 = serving PCI + target PCI, 1 = target PCI only, 2 = serving PCI only
+   uint64_t SSB_positions=0x01;
+   int ssb_subcarrier_offset = 0;
+   int ssb_scan_threads = 0;
+@@ -109,7 +114,7 @@
+   }
+ 
+   int c;
+-  while ((c = getopt(argc, argv, "--:O:c:F:g:hIL:m:M:n:N:o:P:R:s:S:x:y:z:")) != -1) {
++  while ((c = getopt(argc, argv, "--:O:c:D:F:g:hH:IJ:K:L:m:M:n:N:o:P:Q:R:s:S:T:x:y:z:")) != -1) {
+     /* ignore long options starting with '--', option '-O' and their arguments that are handled by configmodule */
+     /* with this opstring getopt returns 1 for non-option arguments, refer to 'man 3 getopt' */
+     if (c == 1 || c == '-' || c == 'O')
+@@ -204,6 +209,30 @@
+         printf("Illegal PBCH phase (0-3) got %d\n",pbch_phase);
+       break;
+ 
++    case 'D': // e2e-ts patch
++      intf_delay = atoi(optarg);
++      break;
++
++    case 'H': // e2e-ts patch
++      ho_mode = atoi(optarg);
++      break;
++
++    case 'J': // e2e-ts patch
++      intf_frame = atoi(optarg);
++      break;
++
++    case 'K': // e2e-ts patch: frame number (SFN) of the generated SSB; the PBCH content and scrambling depend on it
++      frame = atoi(optarg);
++      break;
++
++    case 'Q': // e2e-ts patch
++      intf_nid_cell = atoi(optarg);
++      break;
++
++    case 'T': // e2e-ts patch
++      intf_gain_dB = atof(optarg);
++      break;
++
+     case 'R':
+       N_RB_DL = atoi(optarg);
+       break;
+@@ -383,9 +412,22 @@
+   const uint32_t rxdataF_sz = UE->frame_parms.samples_per_slot_wCP;
+   __attribute__ ((aligned(32))) c16_t rxdataF[UE->frame_parms.nb_antennas_rx][rxdataF_sz];
+   nfapi_nr_dl_tti_ssb_pdu ssb_pdu[64] = {0};
++  // e2e-ts patch (oai-pbchsim-2cell.patch): buffer for the second cell (-Q), added to txdata below
++  c16_t *txdata_intf[2] = {NULL, NULL};
++  if (intf_nid_cell >= 0)
++    for (aa = 0; aa < 2; aa++)
++      txdata_intf[aa] = malloc16_clear(frame_length_complex_samples * sizeof(c16_t));
+   if (input_fd==NULL) {
+     const int prb_mask_words = (frame_parms->N_RB_DL + 63) / 64;
+ 
++    // e2e-ts patch: cell 0 = the -N cell into txdata, cell 1 = the -Q cell into txdata_intf.
++    // All SSB parts (PSS, SSS, PBCH DM-RS, PBCH) read the PCI from phy_cell_id.
++    const int n_cells = intf_nid_cell >= 0 ? 2 : 1;
++    for (int cell = 0; cell < n_cells; cell++) {
++    c16_t **tx_out = cell == 0 ? txdata : txdata_intf;
++    gNB->gNB_config.cell_config.phy_cell_id.value = cell == 0 ? Nid_cell : intf_nid_cell;
++    frame_parms->Nid_cell = gNB->gNB_config.cell_config.phy_cell_id.value;
++
+     for (i=0; i<frame_parms->Lmax; i++) {
+       if((SSB_positions >> i) & 0x01) {
+ 
+@@ -402,7 +444,8 @@
+         for (aa=0; aa<gNB->frame_parms.nb_antennas_tx; aa++)
+           memset(gNB->common_vars.txdataF[aa], 0, frame_parms->samples_per_slot_wCP * sizeof(int32_t));
+ 
+-        nr_common_signal_procedures(gNB, frame, slot, &ssb_pdu[i], prb_mask_words);
++        // e2e-ts patch: the second cell can send another frame number (-J), so another PBCH codeword
++        nr_common_signal_procedures(gNB, cell == 1 && intf_frame >= 0 ? intf_frame : frame, slot, &ssb_pdu[i], prb_mask_words);
+ 
+         int samp = get_samples_slot_timestamp(frame_parms, slot);
+         for (aa = 0; aa < gNB->frame_parms.nb_antennas_tx; aa++) {
+@@ -413,7 +456,7 @@
+                                        frame_parms->ofdm_symbol_size);
+ 
+             PHY_ofdm_mod((int *)gNB->common_vars.txdataF[aa],
+-                         (int *)&txdata[aa][samp],
++                         (int *)&tx_out[aa][samp],
+                          frame_parms->ofdm_symbol_size,
+                          12,
+                          frame_parms->nb_prefix_samples,
+@@ -425,14 +468,14 @@
+                                        frame_parms->ofdm_symbol_size);
+ 
+             PHY_ofdm_mod((int *)gNB->common_vars.txdataF[aa],
+-                         (int *)&txdata[aa][samp],
++                         (int *)&tx_out[aa][samp],
+                          frame_parms->ofdm_symbol_size,
+                          1,
+                          frame_parms->nb_prefix_samples0,
+                          CYCLIC_PREFIX);
+ 
+             PHY_ofdm_mod((int *)gNB->common_vars.txdataF[aa] + frame_parms->ofdm_symbol_size,
+-                         (int *)&txdata[aa][samp + frame_parms->nb_prefix_samples0 + frame_parms->ofdm_symbol_size],
++                         (int *)&tx_out[aa][samp + frame_parms->nb_prefix_samples0 + frame_parms->ofdm_symbol_size],
+                          frame_parms->ofdm_symbol_size,
+                          13,
+                          frame_parms->nb_prefix_samples,
+@@ -441,6 +484,22 @@
+         }
+       }
+     }
++        } // e2e-ts patch: end of the cell loop
++    gNB->gNB_config.cell_config.phy_cell_id.value = Nid_cell;
++    frame_parms->Nid_cell = Nid_cell;
++    if (n_cells == 2) { // e2e-ts patch: txdata = -N cell + gain x -Q cell
++      const double g = pow(10, intf_gain_dB / 20);
++      for (aa = 0; aa < frame_parms->nb_antennas_tx; aa++)
++        for (i = 0; i < frame_length_complex_samples; i++) {
++          const int j = i - intf_delay; // e2e-ts patch: the second cell arrives intf_delay samples later
++          const c16_t x = (j >= 0 && j < frame_length_complex_samples) ? txdata_intf[aa][j] : (c16_t){0, 0};
++          const double re = txdata[aa][i].r + g * x.r;
++          const double im = txdata[aa][i].i + g * x.i;
++          txdata[aa][i].r = re > INT16_MAX ? INT16_MAX : (re < INT16_MIN ? INT16_MIN : (int16_t)lround(re));
++          txdata[aa][i].i = im > INT16_MAX ? INT16_MAX : (im < INT16_MIN ? INT16_MIN : (int16_t)lround(im));
++        }
++      printf("e2e-ts: second cell PCI %d added at %+.1f dB relative to PCI %d\n", intf_nid_cell, intf_gain_dB, Nid_cell);
++    }
+     LOG_M("txsigF0.m", "txsF0", gNB->common_vars.txdataF[0], frame_parms->samples_per_slot_wCP, 1, 1);
+     if (gNB->frame_parms.nb_antennas_tx > 1)
+       LOG_M("txsigF1.m", "txsF1", gNB->common_vars.txdataF[1], frame_parms->samples_per_slot_wCP, 1, 1);
+@@ -523,7 +582,15 @@
+         nr_gscn_info_t gscnInfo[MAX_GSCN_BAND] = {0};
+         const int numGscn = 1;
+         gscnInfo[0].ssbFirstSC = frame_parms->ssb_start_subcarrier;
++        // e2e-ts patch: with -Q, a handover sync: the UE knows the -Q cell as serving cell and searches the -N cell.
++        // Without -Q, a normal initial sync (no target PCI). Set both in every trial: a successful sync changes Nid_cell.
++        UE->frame_parms.Nid_cell = intf_nid_cell >= 0 && ho_mode != 1 ? intf_nid_cell : Nid_cell;
++        UE->target_Nid_cell = intf_nid_cell >= 0 && ho_mode != 2 ? Nid_cell : -1;
+         nr_initial_sync_t ret = nr_initial_sync(&proc, UE, frame_length_complex_samples, rxdata, gscnInfo, numGscn);
++        if (ret.cell_detected && UE->frame_parms.Nid_cell != Nid_cell) { // e2e-ts patch: synced to the wrong cell
++          printf("e2e-ts: synced to PCI %d, not to the -N cell %d\n", UE->frame_parms.Nid_cell, Nid_cell);
++          ret.cell_detected = false;
++        }
+         printf("nr_initial_sync1 returns %s\n", ret.cell_detected ? "cell detected" : "cell not detected");
+         if (!ret.cell_detected)
+           n_errors++;
+@@ -644,6 +711,8 @@
+   free(s_im);
+   free(r_re);
+   free(r_im);
++  for (aa = 0; aa < 2; aa++) // e2e-ts patch
++  free(txdata_intf[aa]);
+   free(txdata);
+ 
+   if (output_fd)
