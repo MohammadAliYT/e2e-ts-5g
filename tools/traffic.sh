@@ -6,6 +6,8 @@
 # serves one client and exits -> DL and UL of the same UE can run at the same time.
 # Result: results/traffic/<time>-<ue>-<dir>-<rate>.json and a one-line summary.
 # Several flows at once: run several calls with & and then wait.
+# Note: under overload the UDP loss is too low. iperf3 does not count packets
+# still in a queue at the end of the test. Use the controller throughput instead.
 set -uo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 source "$root/RAN/interfaces/lab.env"
@@ -24,7 +26,7 @@ sudo ip netns exec "$DN_NS" pkill -f "iperf3 -s -p $port" 2>/dev/null
 sudo ip netns exec "$DN_NS" iperf3 -s -p "$port" -1 -D
 sleep 0.5
 sudo ip netns exec "$ns" iperf3 -c "$DN_IP" -p "$port" -B "$ip" "${mode[@]}" "${rev[@]}" \
-  -t "$dur" -l 1200 -J >"$f" 2>&1
+    -t "$dur" -l 1200 -J >"$f" 2>"${f%.json}.err"
 
 python3 -I - "$f" "$ue" "$dir" "$rate" "$proto" <<'EOF'
 import json, sys
