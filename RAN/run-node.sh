@@ -51,6 +51,23 @@ if [[ "${WITH_E2:-0}" == 1 ]]; then
   config="$work/runtime.conf"
 fi
 
+# A3_MODE (CU only): ctrl (default) = neighbour.conf as it is (offset 15 dB, no automatic handover; the controller decides).
+# 3GPP baselines, TR 36.839 handover parameter sets (the CU hands over on the UE's A3 report):
+#   set1 = A3 offset 3 dB (offset = 6), time to trigger 480 ms (index 9): fewer ping-pongs
+#   set5 = A3 offset -1 dB (offset = -2), time to trigger 40 ms (index 1): fewer handover failures
+case ${A3_MODE:-ctrl} in
+  set1) a3_off=6;  a3_ttt=9 ;;
+  set5) a3_off=-2; a3_ttt=1 ;;
+  *)    a3_off="" ;;
+esac
+if [[ $node == cu && -n $a3_off ]]; then
+  cp "$root/RAN/cu/"*.conf "$work/"
+  sed -i "/^ *A3 *= *(/,/})/{s/offset *= *[-0-9]*/offset = $a3_off/; s/time_to_trigger *= *[0-9]*/time_to_trigger = $a3_ttt/}" \
+    "$work/neighbour.conf"
+  config="$work/$(basename "$config")"
+  echo "A3 $A3_MODE: $(sed -n '/^ *A3 *= *(/,/})/p' "$work/neighbour.conf" | tr -s ' ' | tr '\n' ' ')"
+fi
+
 sudo ip netns exec "$RAN_NS" \
   "$root/upstream/oai/cmake_targets/ran_build/build/nr-softmodem" \
   -O "$config" "${args[@]}" 2>&1 | tee "$node.log"

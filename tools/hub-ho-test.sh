@@ -11,6 +11,11 @@
 # Usage: tools/hub-ho-test.sh [--no-start]      (--no-start: lab already up in hub mode, 2 UEs)
 # HO_TOOL=<script>: handover tool with the interface of tools/ho.sh (default tools/ho.sh);
 #   HO_TOOL=tools/ho-ctrl.sh sends the handover through the running controller (phase 3).
+# HO_GAP=<dB>: send the handover while the target is still <dB> weaker than the source (default 0 = crossing point).
+#   Co-channel test of oai-ue-ho-ssb-cancel.patch: before the patch, 3 and 6 dB ended in T304 expiry.
+# HO_LOAD=<rate>: DL UDP load to the moving UE during each move (tools/traffic.sh), e.g. 10M. Default: no load.
+# HO_TOOL=none: 3GPP baseline. The lab starts with A3_MODE=baseline (A3 3 dB / 480 ms). No handover command: the
+#   source gets weaker in steps (1..10 dB) and the CU hands over on the UE's A3 report. Column HO: "A3@<gap>dB".
 set -uo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 source "$root/RAN/interfaces/lab.env"
@@ -36,15 +41,28 @@ reest() { # number of re-establishments in UE $1's log (a bounce shows up here)
 ho_test() { # <ue number> <CU UE ID> <from DU> <to DU>
   local u=$1 id=$2 a=$3 b=$4 r0 r1 s0 s1 s2 p2 t0 t1 ho_s="-" verdict=FAIL
   r0=$(reest "$u")
-  ctrl loss "ue$u" "du$b" 6 >/dev/null; sleep 2     # target 6 dB weaker
-  ctrl loss "ue$u" "du$b" 3 >/dev/null; sleep 2     # target 3 dB weaker
-  ctrl loss "ue$u" "du$b" 0 >/dev/null              # crossing point: both cells equally strong
+  local g=${HO_GAP:-0} tp=""
+  if [[ -n ${HO_LOAD:-} ]]; then                    # DL load in the source cell during the move
+    "$root/tools/traffic.sh" "ue$u" dl "$HO_LOAD" 30 >>"$log" 2>&1 & tp=$!
+    sleep 2
+  fi
+  for l in 6 3; do                                  # move toward the target in steps, down to the handover point
+    ((l > g)) || continue
+    ctrl loss "ue$u" "du$b" "$l" >/dev/null; sleep 2
+  done
+  ctrl loss "ue$u" "du$b" "$g" >/dev/null           # handover point: target $g dB weaker (0 = crossing point)
   s0=$(serving "$id")
-  if [[ $s0 == "du$a" ]]; then
+  if [[ $s0 == "du$a" && ${HO_TOOL:-} == none ]]; then
+    ho_s="no-A3"
+    for l in 1 2 3 4 5 6 8 10; do                   # source gets weaker; the CU hands over on the UE's A3 report
+      ctrl loss "ue$u" "du$a" "$l" >/dev/null; sleep 4
+      [[ $(serving "$id") == "du$b" ]] && { ho_s="A3@${l}dB"; break; }
+    done
+  elif [[ $s0 == "du$a" ]]; then
     t0=$(date +%s.%N)
     "${HO_TOOL:-$root/tools/ho.sh}" "$id" >>"$log" 2>&1
     t1=$(date +%s.%N)
-    ho_s=$(awk -v a="$t0" -v b="$t1" 'BEGIN { printf "%.1f", b - a }')
+    ho_s=$(awk -v a="$t0" -v b="$t1" 'BEGIN { printf "%.1fs", b - a }')
   else
     echo "  ue$u not on du$a before the handover (serving: $s0) - handover skipped" | tee -a "$log"
   fi
@@ -53,13 +71,15 @@ ho_test() { # <ue number> <CU UE ID> <from DU> <to DU>
   s2=$(serving "$id"); p2=$(loss_pct "$u")
   r1=$(reest "$u")
   if [[ $s2 == "du$b" && ${p2%.*} -le 20 && $r1 -eq $r0 ]]; then verdict=PASS; fi
-  printf '%-4s %-10s %-6s %-9s %-9s %-6s %-6s %s\n' \
-    "ue$u" "du$a->du$b" "${ho_s}s" "$s1" "$s2" "$p2%" "$((r1 - r0))" "$verdict" | tee -a "$log"
+    printf '%-4s %-10s %-6s %-9s %-9s %-6s %-6s %s\n' \
+    "ue$u" "du$a->du$b" "$ho_s" "$s1" "$s2" "$p2%" "$((r1 - r0))" "$verdict" | tee -a "$log"
+  [[ -n $tp ]] && wait "$tp"                        # load ends before the next move starts
 }
 
 if [[ ${1:-} != --no-start ]]; then
   tools/lab-down.sh
-  HUB_DUS=2 HUB_UES=2 HUB_INIT='loss ue1 du2 10;loss ue2 du1 10' LAB_MODE=hub tools/lab-up.sh || exit 1
+  a3=${A3_MODE:-ctrl}; [[ ${HO_TOOL:-} == none ]] && a3=${A3_MODE:-baseline}
+  HUB_DUS=2 HUB_UES=2 HUB_INIT='loss ue1 du2 10;loss ue2 du1 10' A3_MODE=$a3 LAB_MODE=hub tools/lab-up.sh || exit 1
   sleep 5
 fi
 
@@ -71,7 +91,7 @@ if [[ $(basename "${HO_TOOL:-ho.sh}") == ho-ctrl.sh ]]; then
   [[ -p $fifo ]] || { echo "e2e_ctrl runs, but its command FIFO $fifo is missing - no test"; exit 1; }
 fi
 
-echo "# $(date -Is) hub handover test" | tee -a "$log"
+echo "# $(date -Is) hub handover test, HO_GAP=${HO_GAP:-0} dB, HO_LOAD=${HO_LOAD:-none}" | tee -a "$log"
 echo "start: ue1 on $(serving 1), ue2 on $(serving 2)" | tee -a "$log"
 printf '%-4s %-10s %-6s %-9s %-9s %-6s %-6s %s\n' \
   ue move "HO" "after HO" "close" loss reest result | tee -a "$log"

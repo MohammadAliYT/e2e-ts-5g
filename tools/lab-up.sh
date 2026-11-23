@@ -10,6 +10,8 @@
 #   UE1_EXTRA='...'            extra nr-uesoftmodem options for UE1 (e.g. --log_config.nr_rrc_log_level debug)
 #   E2E_NEIGH_DIAG=1           both UEs log the neighbour-measurement diag lines (needed by tools/neigh-meas-test.sh;
 #                              default 0 = off; oai-ue-neigh-known-pci.patch)
+#   A3_MODE=ctrl|set1|set5     CU A3 setting (default ctrl: 15 dB, no automatic handover; set1: 3 dB / 480 ms,
+#                              set5: -1 dB / 40 ms, TR 36.839 sets, the CU hands over on A3; RAN/run-node.sh)
 # The old modes (normal, gate, gate-samefreq, gate-samefreq-ssb0) are in the git history.
 set -uo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -57,7 +59,7 @@ if inran ss -HlnS | grep -q ':36421'; then echo "  RIC already running"; else
   wait_for "RIC (E2 36421)" 20 "sudo ip netns exec $RAN_NS ss -HlnS | grep -q ':36421'"; fi
 
 echo "== RAN (hub mode)"
-bg cu RAN/run-node.sh cu
+bg cu env A3_MODE="${A3_MODE:-ctrl}" RAN/run-node.sh cu   # sudo drops the variable, so pass it on
 wait_for "CU (F1-C 38472)" 30 "sudo ip netns exec $RAN_NS ss -HlnS | grep -q ':38472'"
 
 ndu=${HUB_DUS:-2}; nue=${HUB_UES:-2}
