@@ -33,6 +33,7 @@ case "$node" in
       '--MACRLCs.[0].remote_n_address' "$F1_CU_IP"
       '--rfsimulator.[0].serveraddr' 127.0.0.1
       '--rfsimulator.[0].serverport' "$hub_port"
+      --telnetsrv --telnetsrv.shrmod ci --telnetsrv.listenaddr "$ip"   # OAI CI commands (port 9090), e.g. ci force_reestab
     )
     ;;
   *) printf 'Unknown node: %s\n' "$node" >&2; exit 1 ;;

@@ -23,21 +23,23 @@ typedef struct {
   bool has_cu_ue_id;
   uint32_t cu_ue_id;
 
-  /* RLC: last cumulative byte counters and DU timestamp, per DRB */
+  /* RLC: last cumulative byte counters per DRB; DU time of the last report (all DRBs) */
   bool rlc_init[MAX_RB];
   uint32_t last_tx[MAX_RB];
   uint32_t last_rx[MAX_RB];
-  int64_t last_rlc_ts[MAX_RB];
+  bool rlc_ts_init;
+  int64_t last_rlc_ts;
 
   /* ---- accumulators of the current 1 s window (reset by ue_window_reset) ---- */
   uint64_t w_dl_bytes, w_ul_bytes;
   int64_t w_dl_dt_us, w_ul_dt_us;
-  uint32_t w_n_rlc;      /* DL (DRB 1) reports */
+  uint32_t w_n_rlc;      /* RLC reports (one per report and UE, all DRBs) */
   uint32_t w_rlc_resets; /* counter resets seen (new RLC entity) */
 
   /* DL queue on DRB 1, sampled with every RLC report (~100 per window) */
   uint32_t w_n_q;
-  double w_dl_hol_us_sum, w_dl_buf_bytes_sum; /* head-of-line delay (txsdu_wt_us), queued bytes */
+  /* DL queue over all DRBs, sampled with every RLC report (~100 per window) */
+  double w_dl_hol_us_sum, w_dl_buf_bytes_sum; /* head-of-line delay (max txsdu_wt_us), queued bytes (sum) */
   uint32_t w_dl_hol_us_max, w_dl_buf_bytes_max;
 
   double w_dl_mcs, w_ul_mcs, w_dl_bler, w_ul_bler, w_pusch_snr, w_pucch_snr; /* sums */
